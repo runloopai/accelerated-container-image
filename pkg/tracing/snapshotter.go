@@ -18,15 +18,65 @@ package tracing
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"time"
 
 	snapshotsapi "github.com/containerd/containerd/api/services/snapshots/v1"
 	ptypes "github.com/containerd/containerd/v2/pkg/protobuf/types"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc/metadata"
 )
 
 const tracerName = "accelerated-container-image/snapshotter"
+
+// logTraceInfo logs parent trace ID and span information from the context to a file
+func logTraceInfo(ctx context.Context, method string) {
+	span := trace.SpanFromContext(ctx)
+
+	// Create or append to trace log file
+	file, err := os.OpenFile("/tmp/grpc_trace_info.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return // Silent failure to not disrupt gRPC operations
+	}
+	defer file.Close()
+
+	timestamp := time.Now().Format("2006-01-02 15:04:05.000")
+
+	if span.SpanContext().IsValid() {
+		spanCtx := span.SpanContext()
+		traceInfo := fmt.Sprintf("[%s] Method: %s | TraceID: %s | SpanID: %s | TraceFlags: %d | IsRemote: %t",
+			timestamp,
+			method,
+			spanCtx.TraceID().String(),
+			spanCtx.SpanID().String(),
+			spanCtx.TraceFlags(),
+			spanCtx.IsRemote(),
+		)
+		file.WriteString(traceInfo)
+	} else {
+		traceInfo := fmt.Sprintf("[%s] Method: %s | No valid trace context", timestamp, method)
+		file.WriteString(traceInfo)
+	}
+
+	// Log trace propagation headers
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if traceHeaders := md.Get("traceparent"); len(traceHeaders) > 0 {
+			file.WriteString(fmt.Sprintf(" | TraceParent: %s", traceHeaders[0]))
+		}
+		if traceState := md.Get("tracestate"); len(traceState) > 0 {
+			file.WriteString(fmt.Sprintf(" | TraceState: %s", traceState[0]))
+		}
+		if otHeaders := md.Get("grpc-trace-bin"); len(otHeaders) > 0 {
+			file.WriteString(fmt.Sprintf(" | OT-Binary: present"))
+		}
+	} else {
+		file.WriteString(" | No metadata")
+	}
+	file.WriteString("\n")
+}
 
 // TracingSnapshotter wraps a snapshotter service with OpenTelemetry tracing
 type TracingSnapshotter struct {
@@ -45,6 +95,8 @@ func WithTracing(server snapshotsapi.SnapshotsServer) snapshotsapi.SnapshotsServ
 }
 
 func (s *TracingSnapshotter) Prepare(ctx context.Context, pr *snapshotsapi.PrepareSnapshotRequest) (*snapshotsapi.PrepareSnapshotResponse, error) {
+	logTraceInfo(ctx, "Prepare")
+
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.Prepare", trace.WithAttributes(
 		attribute.String("key", pr.Key),
 		attribute.String("parent", pr.Parent),
@@ -59,6 +111,9 @@ func (s *TracingSnapshotter) Prepare(ctx context.Context, pr *snapshotsapi.Prepa
 }
 
 func (s *TracingSnapshotter) View(ctx context.Context, pr *snapshotsapi.ViewSnapshotRequest) (*snapshotsapi.ViewSnapshotResponse, error) {
+	logTraceInfo(ctx, "View")
+
+	// Create a child span within the existing trace context from gRPC
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.View", trace.WithAttributes(
 		attribute.String("key", pr.Key),
 		attribute.String("parent", pr.Parent),
@@ -73,6 +128,8 @@ func (s *TracingSnapshotter) View(ctx context.Context, pr *snapshotsapi.ViewSnap
 }
 
 func (s *TracingSnapshotter) Mounts(ctx context.Context, mr *snapshotsapi.MountsRequest) (*snapshotsapi.MountsResponse, error) {
+	logTraceInfo(ctx, "Mounts")
+
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.Mounts", trace.WithAttributes(
 		attribute.String("key", mr.Key),
 	))
@@ -86,6 +143,8 @@ func (s *TracingSnapshotter) Mounts(ctx context.Context, mr *snapshotsapi.Mounts
 }
 
 func (s *TracingSnapshotter) Commit(ctx context.Context, cr *snapshotsapi.CommitSnapshotRequest) (*ptypes.Empty, error) {
+	logTraceInfo(ctx, "Commit")
+
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.Commit", trace.WithAttributes(
 		attribute.String("name", cr.Name),
 		attribute.String("key", cr.Key),
@@ -100,6 +159,8 @@ func (s *TracingSnapshotter) Commit(ctx context.Context, cr *snapshotsapi.Commit
 }
 
 func (s *TracingSnapshotter) Remove(ctx context.Context, rr *snapshotsapi.RemoveSnapshotRequest) (*ptypes.Empty, error) {
+	logTraceInfo(ctx, "Remove")
+
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.Remove", trace.WithAttributes(
 		attribute.String("key", rr.Key),
 	))
@@ -113,6 +174,8 @@ func (s *TracingSnapshotter) Remove(ctx context.Context, rr *snapshotsapi.Remove
 }
 
 func (s *TracingSnapshotter) Stat(ctx context.Context, sr *snapshotsapi.StatSnapshotRequest) (*snapshotsapi.StatSnapshotResponse, error) {
+	logTraceInfo(ctx, "Stat")
+
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.Stat", trace.WithAttributes(
 		attribute.String("key", sr.Key),
 	))
@@ -126,6 +189,8 @@ func (s *TracingSnapshotter) Stat(ctx context.Context, sr *snapshotsapi.StatSnap
 }
 
 func (s *TracingSnapshotter) Update(ctx context.Context, sr *snapshotsapi.UpdateSnapshotRequest) (*snapshotsapi.UpdateSnapshotResponse, error) {
+	logTraceInfo(ctx, "Update")
+
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.Update", trace.WithAttributes(
 		attribute.String("name", sr.Info.Name),
 	))
@@ -139,6 +204,8 @@ func (s *TracingSnapshotter) Update(ctx context.Context, sr *snapshotsapi.Update
 }
 
 func (s *TracingSnapshotter) List(sr *snapshotsapi.ListSnapshotsRequest, ss snapshotsapi.Snapshots_ListServer) error {
+	logTraceInfo(ss.Context(), "List")
+
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ss.Context(), "snapshotter.List")
 	defer span.End()
 
@@ -162,6 +229,8 @@ func (t *tracingListServer) Context() context.Context {
 }
 
 func (s *TracingSnapshotter) Usage(ctx context.Context, ur *snapshotsapi.UsageRequest) (*snapshotsapi.UsageResponse, error) {
+	logTraceInfo(ctx, "Usage")
+
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.Usage", trace.WithAttributes(
 		attribute.String("key", ur.Key),
 	))
@@ -181,6 +250,8 @@ func (s *TracingSnapshotter) Usage(ctx context.Context, ur *snapshotsapi.UsageRe
 }
 
 func (s *TracingSnapshotter) Cleanup(ctx context.Context, cr *snapshotsapi.CleanupRequest) (*ptypes.Empty, error) {
+	logTraceInfo(ctx, "Cleanup")
+
 	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.Cleanup")
 	defer span.End()
 

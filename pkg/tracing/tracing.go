@@ -46,15 +46,15 @@ func InitTracer(ctx context.Context) (func(context.Context) error, error) {
 	exporters = append(exporters, otlpExporter)
 
 	// Add console exporter if enabled
-	if os.Getenv("OTEL_TRACES_CONSOLE") == "true" {
-		consoleExporter, err := stdouttrace.New(
-			stdouttrace.WithPrettyPrint(),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("creating console trace exporter: %w", err)
-		}
-		exporters = append(exporters, consoleExporter)
+	//if os.Getenv("OTEL_TRACES_CONSOLE") == "true" {
+	consoleExporter, err := stdouttrace.New(
+		stdouttrace.WithPrettyPrint(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating console trace exporter: %w", err)
 	}
+	exporters = append(exporters, consoleExporter)
+	//}
 
 	// Create trace provider options
 	var opts []sdktrace.TracerProviderOption
