@@ -139,7 +139,7 @@ func main() {
 	// Initialize random seed for request ID generation
 	rand.Seed(time.Now().UnixNano())
 
-	// Use simplified tracing with request ID interceptor
+	// Use tracing with request ID interceptor
 	srv := grpc.NewServer(
 		tracing.WithServerTracing(),
 		grpc.UnaryInterceptor(requestIDInterceptor),

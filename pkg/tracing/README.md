@@ -95,9 +95,56 @@ export OTEL_SERVICE_NAME="accelerated-container-image"
 # OTLP endpoint (e.g., Jaeger collector)
 export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
 
+# Enable console trace output (for development/debugging)
+export OTEL_TRACES_CONSOLE="true"
+
 # Environment tag
 export ENVIRONMENT="production"
 ```
+
+### Console Trace Output
+
+For development and debugging, you can enable console trace output by setting:
+
+```bash
+export OTEL_TRACES_CONSOLE=true
+```
+
+This will output traces to stdout in a pretty-printed JSON format alongside sending them to any configured OTLP collector. This is useful for:
+
+- **Development**: See traces immediately without setting up a collector
+- **Debugging**: Verify trace data is being generated correctly  
+- **Testing**: Validate trace attributes and structure
+- **CI/CD**: Capture traces in build logs
+
+Example console output:
+```json
+{
+	"Name": "snapshots.Prepare",
+	"SpanContext": {
+		"TraceID": "4bf92f3577b34da6a3ce929d0e0e4736",
+		"SpanID": "00f067aa0ba902b7"
+	},
+	"Parent": {
+		"TraceID": "4bf92f3577b34da6a3ce929d0e0e4736", 
+		"SpanID": "78547c8c5c564e1a"
+	},
+	"SpanKind": 2,
+	"StartTime": "2024-01-01T12:00:00Z",
+	"EndTime": "2024-01-01T12:00:01Z",
+	"Attributes": [
+		{
+			"Key": "rpc.system",
+			"Value": {
+				"Type": "STRING",
+				"Value": "grpc"
+			}
+		}
+	]
+}
+```
+
+**Note**: Console output works alongside OTLP export - traces are sent to both destinations when both are configured.
 
 ## Baggage API Usage
 
