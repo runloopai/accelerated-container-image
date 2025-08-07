@@ -41,6 +41,7 @@ import (
 const (
 	overlaybdBaseLayer      = "/opt/overlaybd/baselayers/ext4_64"
 	commitFile              = "overlaybd.commit"
+	layerTarFile            = "layer.tar"
 	labelDistributionSource = "containerd.io/distribution.source"
 )
 
@@ -113,6 +114,18 @@ func (e *overlaybdBuilderEngine) BuildLayer(ctx context.Context, idx int) error 
 			logrus.Debugf("layer %d is from dedup", idx)
 		} else {
 			return fmt.Errorf("layer %d is from dedup but commit file is missing", idx)
+		}
+	} else if _, ok := e.manifest.Layers[idx].Annotations[label.OverlayBDBlobDigest]; ok {
+		// this layer is already an overlaybd layer
+		if commitFilePresent {
+			return fmt.Errorf("layer %d was not converted yet a commit file is present", idx)
+		}
+
+		logrus.Debugf("layer %d is already in overlaybd format", idx)
+
+		// Simply rename the layer.tar file to the commit file.
+		if err := os.Rename(path.Join(layerDir, layerTarFile), path.Join(layerDir, commitFile)); err != nil {
+			return errors.Wrapf(err, "failed to prepare overlaybd layer %d for mounting", idx)
 		}
 	} else {
 		// This should not happen, but if it does, we should fail the conversion or
