@@ -117,6 +117,7 @@ type builderEngineBase struct {
 	dumpManifest bool
 	referrer     bool
 	tarExport    bool
+	retryCount   int
 }
 
 func (e *builderEngineBase) isGzipLayer(ctx context.Context, idx int) (bool, error) {
@@ -183,7 +184,7 @@ func (e *builderEngineBase) uploadManifestAndConfig(ctx context.Context) (specs.
 		Size:      (int64)(len(cbuf)),
 	}
 	if shouldUploadBlob {
-		if err = uploadBytes(ctx, e.pusher, e.manifest.Config, cbuf); err != nil {
+		if err = uploadBytesWithRetry(ctx, e.pusher, e.manifest.Config, cbuf, e.retryCount); err != nil {
 			return specs.Descriptor{}, errors.Wrapf(err, "failed to upload config")
 		}
 		log.G(ctx).Infof("config uploaded")
@@ -207,7 +208,7 @@ func (e *builderEngineBase) uploadManifestAndConfig(ctx context.Context) (specs.
 		Size:      (int64)(len(cbuf)),
 	}
 	if shouldUploadBlob {
-		if err = uploadBytes(ctx, e.pusher, manifestDesc, cbuf); err != nil {
+		if err = uploadBytesWithRetry(ctx, e.pusher, manifestDesc, cbuf, e.retryCount); err != nil {
 			return specs.Descriptor{}, errors.Wrapf(err, "failed to upload manifest")
 		}
 		e.outputDesc = manifestDesc

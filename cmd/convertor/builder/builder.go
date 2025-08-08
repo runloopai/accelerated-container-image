@@ -75,6 +75,9 @@ type BuilderOptions struct {
 	// Push manifests with subject
 	Referrer bool
 
+	// Number of retries for registry upload operations when encountering 429 rate limiting
+	RetryCount int
+
 	// CustomResolver allows using a custom resolver instead of the default docker resolver
 	// Used for tar import/export functionality
 	CustomResolver remotes.Resolver
@@ -223,7 +226,7 @@ func (b *graphBuilder) process(ctx context.Context, src v1.Descriptor, tag bool)
 		} else {
 			pusher = b.pusher
 		}
-		if err := uploadBytes(ctx, pusher, expected, indexBytes); err != nil {
+		if err := uploadBytesWithRetry(ctx, pusher, expected, indexBytes, b.RetryCount); err != nil {
 			return v1.Descriptor{}, fmt.Errorf("failed to upload index: %w", err)
 		}
 		log.G(ctx).Infof("index uploaded, %s", expected.Digest)
@@ -296,6 +299,7 @@ func (b *graphBuilder) buildOne(ctx context.Context, src v1.Descriptor, tag bool
 	engineBase.reserve = b.Reserve
 	engineBase.noUpload = b.NoUpload
 	engineBase.dumpManifest = b.DumpManifest
+	engineBase.retryCount = b.RetryCount
 	if _, ok := b.Resolver.(*FileBasedResolver); ok {
 		engineBase.tarExport = true
 	}
