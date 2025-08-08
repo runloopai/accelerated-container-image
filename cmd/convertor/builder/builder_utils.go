@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"os"
 	"path"
 	"time"
@@ -88,8 +89,15 @@ func retryWithBackoff(ctx context.Context, maxRetries int, operation func() erro
 			return lastErr
 		}
 
-		// Exponential backoff: base delay of 1s, max 30s
-		backoffDelay := time.Duration(math.Min(float64(time.Second)*math.Pow(2, float64(attempt)), float64(30*time.Second)))
+		// Exponential backoff with random jitter: base delay of 1s, max 30s
+		baseDelay := time.Duration(math.Min(float64(time.Second)*math.Pow(2, float64(attempt)), float64(30*time.Second)))
+		// Add random jitter: ±25% of the base delay
+		jitter := time.Duration(float64(baseDelay) * (rand.Float64() - 0.5) * 0.5)
+		backoffDelay := baseDelay + jitter
+		// Ensure minimum delay of 500ms
+		if backoffDelay < 500*time.Millisecond {
+			backoffDelay = 500 * time.Millisecond
+		}
 		logrus.Infof("received retryable error, retrying in %v (attempt %d/%d): %v", backoffDelay, attempt+1, maxRetries, lastErr)
 
 		select {
