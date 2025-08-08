@@ -168,7 +168,7 @@ func (e *turboOCIBuilderEngine) UploadLayer(ctx context.Context, idx int) error 
 		}
 	}
 	desc.Annotations[label.TurboOCIMediaType] = targetMediaType
-	if err := uploadBlob(ctx, e.pusher, path.Join(layerDir, tociLayerTar), desc); err != nil {
+	if err := uploadBlobWithRetry(ctx, e.pusher, path.Join(layerDir, tociLayerTar), desc, e.retryCount); err != nil {
 		return errors.Wrapf(err, "failed to upload layer %d", idx)
 	}
 	e.tociLayers[idx] = desc
@@ -196,7 +196,7 @@ func (e *turboOCIBuilderEngine) UploadImage(ctx context.Context) (specs.Descript
 		},
 	}
 	if !e.mkfs {
-		if err := uploadBlob(ctx, e.pusher, overlaybdBaseLayer, baseDesc); err != nil {
+		if err := uploadBlobWithRetry(ctx, e.pusher, overlaybdBaseLayer, baseDesc, e.retryCount); err != nil {
 			return specs.Descriptor{}, errors.Wrapf(err, "failed to upload baselayer %q", overlaybdBaseLayer)
 		}
 		e.manifest.Layers = append([]specs.Descriptor{baseDesc}, e.manifest.Layers...)
@@ -215,7 +215,7 @@ func (e *turboOCIBuilderEngine) UploadImage(ctx context.Context) (specs.Descript
 
 // If a converted manifest has been found we still need to tag it to match the expected output tag.
 func (e *turboOCIBuilderEngine) TagPreviouslyConvertedManifest(ctx context.Context, desc specs.Descriptor) error {
-	return tagPreviouslyConvertedManifest(ctx, e.pusher, e.fetcher, desc)
+	return tagPreviouslyConvertedManifestWithRetry(ctx, e.pusher, e.fetcher, desc, e.retryCount)
 }
 
 // Layer deduplication in FastOCI is not currently supported due to conversion not

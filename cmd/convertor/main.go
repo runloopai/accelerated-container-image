@@ -59,6 +59,7 @@ var (
 	concurrencyLimit int
 	disableSparse    bool
 	referrer         bool
+	retryCount       int
 
 	// tar import/export
 	importTar     string
@@ -279,6 +280,7 @@ Version: ` + commitID,
 					ConcurrencyLimit: concurrencyLimit,
 					DisableSparse:    disableSparse,
 					Referrer:         referrer,
+					RetryCount:       retryCount,
 				}
 			} else {
 				// Normal registry mode
@@ -307,6 +309,7 @@ Version: ` + commitID,
 					ConcurrencyLimit: concurrencyLimit,
 					DisableSparse:    disableSparse,
 					Referrer:         referrer,
+					RetryCount:       retryCount,
 				}
 			}
 			if overlaybd != "" {
@@ -393,6 +396,7 @@ func init() {
 	rootCmd.Flags().IntVar(&concurrencyLimit, "concurrency-limit", 4, "the number of manifests that can be built at the same time, used for multi-arch images, 0 means no limit")
 	rootCmd.Flags().BoolVar(&disableSparse, "disable-sparse", false, "disable sparse file for overlaybd")
 	rootCmd.Flags().BoolVar(&referrer, "referrer", false, "push converted manifests with subject, note '--oci' will be enabled automatically if '--referrer' is set, cause the referrer must be in OCI format.")
+	rootCmd.Flags().IntVar(&retryCount, "retry-count", 5, "number of retries for registry upload operations when encountering 429 rate limiting")
 
 	// tar import/export
 	rootCmd.Flags().StringVar(&importTar, "import-tar", "", "import image from tar file (OCI layout format)")

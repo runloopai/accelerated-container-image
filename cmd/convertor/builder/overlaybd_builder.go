@@ -192,7 +192,7 @@ func (e *overlaybdBuilderEngine) UploadLayer(ctx context.Context, idx int) error
 	}
 	shouldUploadBlob := !e.noUpload || e.tarExport
 	if shouldUploadBlob {
-		if err := uploadBlob(ctx, e.pusher, path.Join(layerDir, commitFile), desc); err != nil {
+		if err := uploadBlobWithRetry(ctx, e.pusher, path.Join(layerDir, commitFile), desc, e.retryCount); err != nil {
 			return errors.Wrapf(err, "failed to upload layer %d", idx)
 		}
 	}
@@ -354,7 +354,7 @@ func (e *overlaybdBuilderEngine) CheckForConvertedManifest(ctx context.Context) 
 
 // If a converted manifest has been found we still need to tag it to match the expected output tag.
 func (e *overlaybdBuilderEngine) TagPreviouslyConvertedManifest(ctx context.Context, desc specs.Descriptor) error {
-	return tagPreviouslyConvertedManifest(ctx, e.pusher, e.fetcher, desc)
+	return tagPreviouslyConvertedManifestWithRetry(ctx, e.pusher, e.fetcher, desc, e.retryCount)
 }
 
 // mountImage is responsible for mounting a specific manifest from a source repository, this includes
@@ -391,7 +391,7 @@ func (e *overlaybdBuilderEngine) mountImage(ctx context.Context, manifest specs.
 	if err != nil {
 		return err
 	}
-	return uploadBytes(ctx, e.pusher, desc, cbuf)
+	return uploadBytesWithRetry(ctx, e.pusher, desc, cbuf, e.retryCount)
 }
 
 func (e *overlaybdBuilderEngine) StoreConvertedManifestDetails(ctx context.Context) error {
@@ -483,7 +483,7 @@ func (e *overlaybdBuilderEngine) uploadBaseLayer(ctx context.Context) (specs.Des
 	}
 	shouldUploadBlob := !e.noUpload || e.tarExport
 	if shouldUploadBlob {
-		if err = uploadBlob(ctx, e.pusher, tarFile, baseDesc); err != nil {
+		if err = uploadBlobWithRetry(ctx, e.pusher, tarFile, baseDesc, e.retryCount); err != nil {
 			return specs.Descriptor{}, errors.Wrapf(err, "failed to upload baselayer")
 		}
 		logrus.Infof("baselayer uploaded")

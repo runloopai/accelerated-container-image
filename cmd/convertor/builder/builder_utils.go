@@ -24,12 +24,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	"github.com/containerd/continuity"
 	"github.com/containerd/errdefs"
@@ -42,6 +45,63 @@ import (
 
 	t "github.com/containerd/accelerated-container-image/pkg/types"
 )
+
+// isRetryableError checks if the error is retryable (429 or 5xx errors)
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for containerd docker error types
+	var dockerErr *docker.Error
+	if errors.As(err, &dockerErr) {
+		switch dockerErr.Code {
+		case docker.ErrorCodeTooManyRequests:
+			return true
+		case docker.ErrorCodeUnavailable:
+			return true
+		default:
+			return false
+		}
+	}
+
+	return false
+}
+
+// retryWithBackoff executes a function with exponential backoff on retryable errors
+func retryWithBackoff(ctx context.Context, maxRetries int, operation func() error) error {
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		lastErr = operation()
+
+		if lastErr == nil {
+			return nil
+		}
+
+		if !isRetryableError(lastErr) {
+			return lastErr
+		}
+
+		if attempt == maxRetries {
+			logrus.Warnf("max retries (%d) reached for retryable error: %v", maxRetries, lastErr)
+			return lastErr
+		}
+
+		// Exponential backoff: base delay of 1s, max 30s
+		backoffDelay := time.Duration(math.Min(float64(time.Second)*math.Pow(2, float64(attempt)), float64(30*time.Second)))
+		logrus.Infof("received retryable error, retrying in %v (attempt %d/%d): %v", backoffDelay, attempt+1, maxRetries, lastErr)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoffDelay):
+			continue
+		}
+	}
+
+	return lastErr
+}
 
 func fetch(ctx context.Context, fetcher remotes.Fetcher, desc specs.Descriptor, target any) error {
 	rc, err := fetcher.Fetch(ctx, desc)
@@ -200,41 +260,57 @@ func getFileDesc(filepath string, decompress bool) (specs.Descriptor, error) {
 }
 
 func uploadBlob(ctx context.Context, pusher remotes.Pusher, path string, desc specs.Descriptor) error {
-	cw, err := pusher.Push(ctx, desc)
-	if err != nil {
-		if errdefs.IsAlreadyExists(err) {
-			logrus.Infof("layer %s exists", desc.Digest.String())
-			return nil
-		}
-		return err
-	}
+	return uploadBlobWithRetry(ctx, pusher, path, desc, 0)
+}
 
-	defer cw.Close()
-	fobd, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer fobd.Close()
-	if err = content.Copy(ctx, cw, fobd, desc.Size, desc.Digest); err != nil {
-		return err
-	}
-	return nil
+func uploadBlobWithRetry(ctx context.Context, pusher remotes.Pusher, path string, desc specs.Descriptor, retryCount int) error {
+	return retryWithBackoff(ctx, retryCount, func() error {
+		cw, err := pusher.Push(ctx, desc)
+		if err != nil {
+			if errdefs.IsAlreadyExists(err) {
+				logrus.Infof("layer %s exists", desc.Digest.String())
+				return nil
+			}
+			return err
+		}
+
+		defer cw.Close()
+		fobd, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer fobd.Close()
+		if err = content.Copy(ctx, cw, fobd, desc.Size, desc.Digest); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func uploadBytes(ctx context.Context, pusher remotes.Pusher, desc specs.Descriptor, data []byte) error {
-	cw, err := pusher.Push(ctx, desc)
-	if err != nil {
-		if errdefs.IsAlreadyExists(err) {
-			logrus.Infof("content %s exists", desc.Digest.String())
-			return nil
+	return uploadBytesWithRetry(ctx, pusher, desc, data, 0)
+}
+
+func uploadBytesWithRetry(ctx context.Context, pusher remotes.Pusher, desc specs.Descriptor, data []byte, retryCount int) error {
+	return retryWithBackoff(ctx, retryCount, func() error {
+		cw, err := pusher.Push(ctx, desc)
+		if err != nil {
+			if errdefs.IsAlreadyExists(err) {
+				logrus.Infof("content %s exists", desc.Digest.String())
+				return nil
+			}
+			return err
 		}
-		return err
-	}
-	defer cw.Close()
-	return content.Copy(ctx, cw, bytes.NewReader(data), desc.Size, desc.Digest)
+		defer cw.Close()
+		return content.Copy(ctx, cw, bytes.NewReader(data), desc.Size, desc.Digest)
+	})
 }
 
 func tagPreviouslyConvertedManifest(ctx context.Context, pusher remotes.Pusher, fetcher remotes.Fetcher, desc specs.Descriptor) error {
+	return tagPreviouslyConvertedManifestWithRetry(ctx, pusher, fetcher, desc, 0)
+}
+
+func tagPreviouslyConvertedManifestWithRetry(ctx context.Context, pusher remotes.Pusher, fetcher remotes.Fetcher, desc specs.Descriptor, retryCount int) error {
 	manifest := specs.Manifest{}
 	if err := fetch(ctx, fetcher, desc, &manifest); err != nil {
 		return fmt.Errorf("failed to fetch converted manifest: %w", err)
@@ -243,7 +319,7 @@ func tagPreviouslyConvertedManifest(ctx context.Context, pusher remotes.Pusher, 
 	if err != nil {
 		return err
 	}
-	if err := uploadBytes(ctx, pusher, desc, cbuf); err != nil {
+	if err := uploadBytesWithRetry(ctx, pusher, desc, cbuf, retryCount); err != nil {
 		return fmt.Errorf("failed to tag converted manifest: %w", err)
 	}
 	return nil
