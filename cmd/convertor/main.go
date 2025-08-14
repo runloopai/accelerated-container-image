@@ -208,14 +208,12 @@ Version: ` + commitID,
 
 					// Create registry resolver (same logic as in builder.go)
 					transport := &http.Transport{
-						TLSClientConfig:       tlsConfig,
-						Proxy:                 http.ProxyFromEnvironment,
-						DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-						MaxIdleConns:          10,
-						IdleConnTimeout:       30 * time.Second,
-						ResponseHeaderTimeout: 5 * time.Second,
-						TLSHandshakeTimeout:   5 * time.Second,
-						ExpectContinueTimeout: 5 * time.Second,
+						TLSClientConfig:     tlsConfig,
+						Proxy:               http.ProxyFromEnvironment,
+						DialContext:         (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+						MaxIdleConns:        100,
+						IdleConnTimeout:     90 * time.Second,
+						TLSHandshakeTimeout: 10 * time.Second,
 					}
 					client := &http.Client{Transport: transport}
 					registryResolver := docker.NewResolver(docker.ResolverOptions{
