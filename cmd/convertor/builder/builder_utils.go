@@ -26,6 +26,7 @@ import (
 	"io"
 	"math"
 	"math/rand"
+	"net"
 	"os"
 	"path"
 	"time"
@@ -64,6 +65,8 @@ func isRetryableError(err error) bool {
 		default:
 			return false
 		}
+	} else if err, ok := err.(net.Error); ok && err.Timeout() {
+		return true
 	}
 
 	return false
