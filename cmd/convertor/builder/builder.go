@@ -262,7 +262,7 @@ func (b *graphBuilder) buildOne(ctx context.Context, src v1.Descriptor, tag bool
 		ctx = log.WithLogger(ctx, log.G(ctx).WithField("platform", platform))
 	}
 	workdir := filepath.Join(b.WorkDir, fmt.Sprintf("%d-%s-%s", id, strings.ReplaceAll(platform, "/", "_"), src.Digest.Encoded()))
-	log.G(ctx).Infof("building %s ...", workdir)
+	log.G(ctx).Debugf("building %s ...", workdir)
 
 	// init build engine
 	manifest, config, err := fetchManifestAndConfig(ctx, b.fetcher, src)
@@ -335,10 +335,10 @@ func Build(ctx context.Context, opt BuilderOptions) error {
 
 	// Use custom resolver if provided, otherwise create default docker resolver
 	if opt.CustomResolver != nil {
-		log.G(ctx).Info("using custom resolver (tar import mode)")
+		log.G(ctx).Debug("using custom resolver (tar import mode)")
 		resolver = opt.CustomResolver
 	} else {
-		log.G(ctx).Info("using docker registry resolver")
+		log.G(ctx).Debug("using docker registry resolver")
 		tlsConfig, err := loadTLSConfig(opt.CertOption)
 		if err != nil {
 			return fmt.Errorf("failed to load certifications: %w", err)

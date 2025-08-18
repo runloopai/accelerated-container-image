@@ -135,7 +135,7 @@ func fetch(ctx context.Context, fetcher remotes.Fetcher, desc specs.Descriptor, 
 
 func fetchManifest(ctx context.Context, fetcher remotes.Fetcher, desc specs.Descriptor) (*specs.Manifest, error) {
 	platformMatcher := platforms.Default()
-	log.G(ctx).Infof("fetching manifest %v with type %v", desc.Digest, desc.MediaType)
+	log.G(ctx).Debugf("fetching manifest %v with type %v", desc.Digest, desc.MediaType)
 	switch desc.MediaType {
 	case images.MediaTypeDockerSchema2Manifest, specs.MediaTypeImageManifest:
 		manifest := specs.Manifest{}
