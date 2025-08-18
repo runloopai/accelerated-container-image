@@ -279,7 +279,7 @@ func uploadBlobWithRetry(ctx context.Context, pusher remotes.Pusher, path string
 		cw, err := pusher.Push(ctx, desc)
 		if err != nil {
 			if errdefs.IsAlreadyExists(err) {
-				logrus.Infof("layer %s exists", desc.Digest.String())
+				logrus.Debugf("layer %s exists", desc.Digest.String())
 				return nil
 			}
 			return err
