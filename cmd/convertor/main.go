@@ -84,6 +84,8 @@ Description: overlaybd convertor is a standalone userspace image conversion tool
 
 Version: ` + commitID,
 		Run: func(cmd *cobra.Command, args []string) {
+			// Set default log level to Info, enable Debug with --verbose
+			logrus.SetLevel(logrus.InfoLevel)
 			if verbose {
 				logrus.SetLevel(logrus.DebugLevel)
 			}
@@ -127,7 +129,7 @@ Version: ` + commitID,
 
 			if importTar != "" {
 				// Import mode - create content store resolver from tar
-				logrus.Infof("importing from tar file: %s", importTar)
+				logrus.Debugf("importing from tar file: %s", importTar)
 				var err error
 				importResolver, err = builder.NewContentStoreResolverFromTar(ctx, importTar)
 				if err != nil {
@@ -159,23 +161,23 @@ Version: ` + commitID,
 				if ref == "" {
 					ref = images[0].Name
 					isMultiArch = (images[0].Target.MediaType == "application/vnd.oci.image.index.v1+json")
-					logrus.Warnf("no main index found, using first image: %s", ref)
+					logrus.Debugf("no main index found, using first image: %s", ref)
 				} else {
-					logrus.Infof("found main image reference: %s", ref)
+					logrus.Debugf("found main image reference: %s", ref)
 				}
 
 				// Log what we're building
 				if isMultiArch {
-					logrus.Infof("building multi-arch image with %d total imported images", len(images))
+					logrus.Debugf("building multi-arch image with %d total imported images", len(images))
 				} else {
-					logrus.Infof("building single-arch image: %s", ref)
+					logrus.Debugf("building single-arch image: %s", ref)
 				}
 
 				// Choose resolver based on export mode
 				var customResolver remotes.Resolver
 				if exportTar != "" {
 					// For tar export, use FileBasedResolver to capture converted layers locally
-					logrus.Infof("tar export mode: using file-based resolver to capture converted layers")
+					logrus.Debugf("tar export mode: using file-based resolver to capture converted layers")
 					var err error
 					exportResolver, err = builder.NewFileBasedResolver(importResolver.Store(), importResolver.ImageStore())
 					if err != nil {
@@ -199,7 +201,7 @@ Version: ` + commitID,
 						logrus.Error("repository is required when not using export-tar")
 						os.Exit(1)
 					}
-					logrus.Infof("registry export mode: creating hybrid resolver for tar import -> registry push")
+					logrus.Debugf("registry export mode: creating hybrid resolver for tar import -> registry push")
 
 					// Create registry resolver for pushing (simplified TLS config)
 					tlsConfig := &tls.Config{
@@ -318,7 +320,7 @@ Version: ` + commitID,
 				switch dbType {
 				case "mysql":
 					if dbstr == "" {
-						logrus.Warnf("no db-str was provided, falling back to no deduplication")
+						logrus.Debugf("no db-str was provided, falling back to no deduplication")
 					}
 					db, err := sql.Open("mysql", dbstr)
 					if err != nil {
@@ -328,8 +330,8 @@ Version: ` + commitID,
 					opt.DB = database.NewSqlDB(db)
 				case "":
 				default:
-					logrus.Warnf("db-type %s was provided but is not one of known db types. Available: mysql", dbType)
-					logrus.Warnf("falling back to no deduplication")
+					logrus.Debugf("db-type %s was provided but is not one of known db types. Available: mysql", dbType)
+					logrus.Debugf("falling back to no deduplication")
 				}
 
 				if err := builder.Build(ctx, opt); err != nil {
@@ -340,7 +342,7 @@ Version: ` + commitID,
 
 				// Handle tar export if requested
 				if exportTar != "" && exportResolver != nil {
-					logrus.Infof("exporting converted overlaybd layers to tar file: %s", exportTar)
+					logrus.Debugf("exporting converted overlaybd layers to tar file: %s", exportTar)
 					if err := builder.ExportContentStoreToTar(ctx, exportResolver.OutputStore(), exportResolver.OutputImageStore(), exportTar); err != nil {
 						logrus.Errorf("failed to export tar file: %v", err)
 						os.Exit(1)
@@ -360,7 +362,7 @@ Version: ` + commitID,
 
 				// Handle tar export if requested
 				if exportTar != "" && exportResolver != nil {
-					logrus.Infof("exporting converted turboOCI layers to tar file: %s", exportTar)
+					logrus.Debugf("exporting converted turboOCI layers to tar file: %s", exportTar)
 					if err := builder.ExportContentStoreToTar(ctx, exportResolver.OutputStore(), exportResolver.OutputImageStore(), exportTar); err != nil {
 						logrus.Errorf("failed to export tar file: %v", err)
 						os.Exit(1)

@@ -486,7 +486,7 @@ func (e *overlaybdBuilderEngine) uploadBaseLayer(ctx context.Context) (specs.Des
 		if err = uploadBlobWithRetry(ctx, e.pusher, tarFile, baseDesc, e.retryCount); err != nil {
 			return specs.Descriptor{}, errors.Wrapf(err, "failed to upload baselayer")
 		}
-		logrus.Infof("baselayer uploaded")
+		logrus.Debugf("baselayer uploaded")
 	}
 	return baseDesc, nil
 }
@@ -526,7 +526,7 @@ func (e *overlaybdBuilderEngine) commit(ctx context.Context, dir string, idx int
 	if err := utils.Commit(ctx, dir, dir, false, opts...); err != nil {
 		return err
 	}
-	logrus.Infof("layer %d committed, uuid: %s, parent uuid: %s", idx, curUUID, parentUUID)
+	logrus.Debugf("layer %d committed, uuid: %s, parent uuid: %s", idx, curUUID, parentUUID)
 	return nil
 }
 

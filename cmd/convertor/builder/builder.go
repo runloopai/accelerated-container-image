@@ -130,7 +130,7 @@ func (b *graphBuilder) Build(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to build %q: %w", src.Digest, err)
 		}
-		log.G(gctx).Infof("converted to %q, digest: %q", b.TargetRef, target.Digest)
+		log.G(gctx).Debugf("converted to %q, digest: %q", b.TargetRef, target.Digest)
 		return nil
 	})
 	return g.Wait()
@@ -141,7 +141,7 @@ func (b *graphBuilder) process(ctx context.Context, src v1.Descriptor, tag bool)
 	if src.Platform != nil && src.Platform.OS == "unknown" && src.Platform.Architecture == "unknown" {
 		// This might be a provenance manifest, check if it should be skipped
 		if utils.IsProvenanceDescriptor(src) {
-			log.G(ctx).Infof("skipping provenance manifest: %s (platform: %s/%s)", src.Digest, src.Platform.OS, src.Platform.Architecture)
+			log.G(ctx).Debugf("skipping provenance manifest: %s (platform: %s/%s)", src.Digest, src.Platform.OS, src.Platform.Architecture)
 			// Return a special "skipped" descriptor instead of an error
 			return v1.Descriptor{}, nil
 		}
@@ -229,7 +229,7 @@ func (b *graphBuilder) process(ctx context.Context, src v1.Descriptor, tag bool)
 		if err := uploadBytesWithRetry(ctx, pusher, expected, indexBytes, b.RetryCount); err != nil {
 			return v1.Descriptor{}, fmt.Errorf("failed to upload index: %w", err)
 		}
-		log.G(ctx).Infof("index uploaded, %s", expected.Digest)
+		log.G(ctx).Debugf("index uploaded, %s", expected.Digest)
 		return expected, nil
 	default:
 		return v1.Descriptor{}, fmt.Errorf("unsupported media type %q", src.MediaType)
@@ -262,7 +262,7 @@ func (b *graphBuilder) buildOne(ctx context.Context, src v1.Descriptor, tag bool
 		ctx = log.WithLogger(ctx, log.G(ctx).WithField("platform", platform))
 	}
 	workdir := filepath.Join(b.WorkDir, fmt.Sprintf("%d-%s-%s", id, strings.ReplaceAll(platform, "/", "_"), src.Digest.Encoded()))
-	log.G(ctx).Infof("building %s ...", workdir)
+	log.G(ctx).Debugf("building %s ...", workdir)
 
 	// init build engine
 	manifest, config, err := fetchManifestAndConfig(ctx, b.fetcher, src)
@@ -335,10 +335,10 @@ func Build(ctx context.Context, opt BuilderOptions) error {
 
 	// Use custom resolver if provided, otherwise create default docker resolver
 	if opt.CustomResolver != nil {
-		log.G(ctx).Info("using custom resolver (tar import mode)")
+		log.G(ctx).Debug("using custom resolver (tar import mode)")
 		resolver = opt.CustomResolver
 	} else {
-		log.G(ctx).Info("using docker registry resolver")
+		log.G(ctx).Debug("using docker registry resolver")
 		tlsConfig, err := loadTLSConfig(opt.CertOption)
 		if err != nil {
 			return fmt.Errorf("failed to load certifications: %w", err)
@@ -403,7 +403,7 @@ func (b *overlaybdBuilder) Build(ctx context.Context) (v1.Descriptor, error) {
 	// check if manifest conversion result is already present in registry, if so, we can avoid conversion.
 	// when errors are encountered fallback to regular conversion
 	if convertedDesc, err := b.engine.CheckForConvertedManifest(ctx); err == nil && convertedDesc.Digest != "" {
-		logrus.Infof("Image found already converted in registry with digest %s", convertedDesc.Digest)
+		logrus.Debugf("Image found already converted in registry with digest %s", convertedDesc.Digest)
 		// Even if the image has been found we still need to make sure the requested tag is set
 		// fetch the manifest then push again with the requested tag
 		if err := b.engine.TagPreviouslyConvertedManifest(ctx, convertedDesc); err != nil {
@@ -453,7 +453,7 @@ func (b *overlaybdBuilder) Build(ctx context.Context) (v1.Descriptor, error) {
 				// download the converted layer
 				err := b.engine.DownloadConvertedLayer(rctx, idx, *cachedLayer)
 				if err == nil {
-					logrus.Infof("downloaded cached layer %d", idx)
+					logrus.Debugf("downloaded cached layer %d", idx)
 					sendToChannel(rctx, downloaded[idx], nil)
 					return nil
 				}
@@ -463,7 +463,7 @@ func (b *overlaybdBuilder) Build(ctx context.Context) (v1.Descriptor, error) {
 			if err := b.engine.DownloadLayer(rctx, idx); err != nil {
 				return err
 			}
-			logrus.Infof("downloaded layer %d", idx)
+			logrus.Debugf("downloaded layer %d", idx)
 			sendToChannel(rctx, downloaded[idx], nil)
 			return nil
 		})
@@ -482,7 +482,7 @@ func (b *overlaybdBuilder) Build(ctx context.Context) (v1.Descriptor, error) {
 			if err := b.engine.BuildLayer(rctx, idx); err != nil {
 				return fmt.Errorf("failed to convert layer %d: %w", idx, err)
 			}
-			logrus.Infof("layer %d converted", idx)
+			logrus.Debugf("layer %d converted", idx)
 			// send to upload(idx) and convert(idx+1) once each
 			sendToChannel(rctx, converted[idx], nil)
 			if idx+1 < b.layers {
@@ -499,7 +499,7 @@ func (b *overlaybdBuilder) Build(ctx context.Context) (v1.Descriptor, error) {
 				return fmt.Errorf("failed to upload layer %d: %w", idx, err)
 			}
 			b.engine.StoreConvertedLayerDetails(rctx, idx)
-			logrus.Infof("layer %d uploaded", idx)
+			logrus.Debugf("layer %d uploaded", idx)
 			return nil
 		})
 	}

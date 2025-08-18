@@ -113,47 +113,47 @@ func NewContentStoreResolverFromTar(ctx context.Context, tarPath string) (*Conte
 	}
 
 	// Store image references (skip provenance layers)
-	log.G(ctx).Infof("processing %d manifests from index", len(index.Manifests))
+	log.G(ctx).Debugf("processing %d manifests from index", len(index.Manifests))
 	for i, manifest := range index.Manifests {
-		log.G(ctx).Infof("=== Processing manifest %d/%d ===", i+1, len(index.Manifests))
-		log.G(ctx).Infof("  MediaType: %s", manifest.MediaType)
-		log.G(ctx).Infof("  Digest: %s", manifest.Digest)
-		log.G(ctx).Infof("  Size: %d bytes", manifest.Size)
+		log.G(ctx).Debugf("=== Processing manifest %d/%d ===", i+1, len(index.Manifests))
+		log.G(ctx).Debugf("  MediaType: %s", manifest.MediaType)
+		log.G(ctx).Debugf("  Digest: %s", manifest.Digest)
+		log.G(ctx).Debugf("  Size: %d bytes", manifest.Size)
 
 		if manifest.Platform != nil {
-			log.G(ctx).Infof("  Platform: %s/%s", manifest.Platform.OS, manifest.Platform.Architecture)
+			log.G(ctx).Debugf("  Platform: %s/%s", manifest.Platform.OS, manifest.Platform.Architecture)
 			if manifest.Platform.Variant != "" {
-				log.G(ctx).Infof("  Platform Variant: %s", manifest.Platform.Variant)
+				log.G(ctx).Debugf("  Platform Variant: %s", manifest.Platform.Variant)
 			}
 		}
 
 		if manifest.ArtifactType != "" {
-			log.G(ctx).Infof("  ArtifactType: %s", manifest.ArtifactType)
+			log.G(ctx).Debugf("  ArtifactType: %s", manifest.ArtifactType)
 		}
 
 		if manifest.Annotations != nil && len(manifest.Annotations) > 0 {
-			log.G(ctx).Infof("  Annotations:")
+			log.G(ctx).Debugf("  Annotations:")
 			for key, value := range manifest.Annotations {
-				log.G(ctx).Infof("    %s: %s", key, value)
+				log.G(ctx).Debugf("    %s: %s", key, value)
 			}
 		}
 
 		// Skip provenance and attestation manifests
 		if isProvenanceManifestWithContent(ctx, store, manifest) {
-			log.G(ctx).Infof("  ❌ SKIPPING: Detected as provenance/attestation manifest")
+			log.G(ctx).Debugf("  ❌ SKIPPING: Detected as provenance/attestation manifest")
 			continue
 		}
 
 		// Check if this is an image index (multi-arch)
 		if manifest.MediaType == v1.MediaTypeImageIndex || manifest.MediaType == "application/vnd.docker.distribution.manifest.list.v2+json" {
-			log.G(ctx).Infof("  📁 FOUND IMAGE INDEX: Importing as-is for multi-arch conversion")
+			log.G(ctx).Debugf("  📁 FOUND IMAGE INDEX: Importing as-is for multi-arch conversion")
 
 			// Import the index itself - let the builder handle platform traversal
 			ref := fmt.Sprintf("imported:%s", manifest.Digest.Encoded()[:12])
 			if manifest.Annotations != nil {
 				if name, ok := manifest.Annotations["org.opencontainers.image.ref.name"]; ok {
 					ref = name
-					log.G(ctx).Infof("  Using annotation-based ref: %s", ref)
+					log.G(ctx).Debugf("  Using annotation-based ref: %s", ref)
 				}
 			}
 
@@ -162,18 +162,18 @@ func NewContentStoreResolverFromTar(ctx context.Context, tarPath string) (*Conte
 				Target: manifest,
 			}
 			imageStore.Create(ctx, image)
-			log.G(ctx).Infof("  ✅ IMPORTED INDEX: %s -> %s (will be processed as multi-arch)", ref, manifest.Digest)
+			log.G(ctx).Debugf("  ✅ IMPORTED INDEX: %s -> %s (will be processed as multi-arch)", ref, manifest.Digest)
 			continue
 		}
 
-		log.G(ctx).Infof("  ✅ PROCESSING: Regular container manifest")
+		log.G(ctx).Debugf("  ✅ PROCESSING: Regular container manifest")
 
 		// Generate a reference name for the imported image
 		ref := fmt.Sprintf("imported:%s", manifest.Digest.Encoded()[:12])
 		if manifest.Annotations != nil {
 			if name, ok := manifest.Annotations["org.opencontainers.image.ref.name"]; ok {
 				ref = name
-				log.G(ctx).Infof("  Using annotation-based ref: %s", ref)
+				log.G(ctx).Debugf("  Using annotation-based ref: %s", ref)
 			}
 		}
 
@@ -182,7 +182,7 @@ func NewContentStoreResolverFromTar(ctx context.Context, tarPath string) (*Conte
 			Target: manifest,
 		}
 		imageStore.Create(ctx, image)
-		log.G(ctx).Infof("  ✅ IMPORTED: %s -> %s", ref, manifest.Digest)
+		log.G(ctx).Debugf("  ✅ IMPORTED: %s -> %s", ref, manifest.Digest)
 	}
 
 	return NewContentStoreResolver(store, imageStore), nil
