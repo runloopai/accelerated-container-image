@@ -21,12 +21,9 @@ import (
 
 	snapshotsapi "github.com/containerd/containerd/api/services/snapshots/v1"
 	ptypes "github.com/containerd/containerd/v2/pkg/protobuf/types"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
-
-const tracerName = "accelerated-container-image/snapshotter"
 
 // TracingSnapshotter wraps a snapshotter service with OpenTelemetry tracing
 type TracingSnapshotter struct {
@@ -45,7 +42,7 @@ func WithTracing(server snapshotsapi.SnapshotsServer) snapshotsapi.SnapshotsServ
 }
 
 func (s *TracingSnapshotter) Prepare(ctx context.Context, pr *snapshotsapi.PrepareSnapshotRequest) (*snapshotsapi.PrepareSnapshotResponse, error) {
-	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.Prepare", trace.WithAttributes(
+	ctx, span := GetDefaultTracer().Start(ctx, "snapshotter.Prepare", trace.WithAttributes(
 		attribute.String("key", pr.Key),
 		attribute.String("parent", pr.Parent),
 	))
@@ -59,7 +56,7 @@ func (s *TracingSnapshotter) Prepare(ctx context.Context, pr *snapshotsapi.Prepa
 }
 
 func (s *TracingSnapshotter) View(ctx context.Context, pr *snapshotsapi.ViewSnapshotRequest) (*snapshotsapi.ViewSnapshotResponse, error) {
-	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.View", trace.WithAttributes(
+	ctx, span := GetDefaultTracer().Start(ctx, "snapshotter.View", trace.WithAttributes(
 		attribute.String("key", pr.Key),
 		attribute.String("parent", pr.Parent),
 	))
@@ -73,7 +70,7 @@ func (s *TracingSnapshotter) View(ctx context.Context, pr *snapshotsapi.ViewSnap
 }
 
 func (s *TracingSnapshotter) Mounts(ctx context.Context, mr *snapshotsapi.MountsRequest) (*snapshotsapi.MountsResponse, error) {
-	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.Mounts", trace.WithAttributes(
+	ctx, span := GetDefaultTracer().Start(ctx, "snapshotter.Mounts", trace.WithAttributes(
 		attribute.String("key", mr.Key),
 	))
 	defer span.End()
@@ -86,7 +83,7 @@ func (s *TracingSnapshotter) Mounts(ctx context.Context, mr *snapshotsapi.Mounts
 }
 
 func (s *TracingSnapshotter) Commit(ctx context.Context, cr *snapshotsapi.CommitSnapshotRequest) (*ptypes.Empty, error) {
-	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.Commit", trace.WithAttributes(
+	ctx, span := GetDefaultTracer().Start(ctx, "snapshotter.Commit", trace.WithAttributes(
 		attribute.String("name", cr.Name),
 		attribute.String("key", cr.Key),
 	))
@@ -100,7 +97,7 @@ func (s *TracingSnapshotter) Commit(ctx context.Context, cr *snapshotsapi.Commit
 }
 
 func (s *TracingSnapshotter) Remove(ctx context.Context, rr *snapshotsapi.RemoveSnapshotRequest) (*ptypes.Empty, error) {
-	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.Remove", trace.WithAttributes(
+	ctx, span := GetDefaultTracer().Start(ctx, "snapshotter.Remove", trace.WithAttributes(
 		attribute.String("key", rr.Key),
 	))
 	defer span.End()
@@ -113,20 +110,12 @@ func (s *TracingSnapshotter) Remove(ctx context.Context, rr *snapshotsapi.Remove
 }
 
 func (s *TracingSnapshotter) Stat(ctx context.Context, sr *snapshotsapi.StatSnapshotRequest) (*snapshotsapi.StatSnapshotResponse, error) {
-	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.Stat", trace.WithAttributes(
-		attribute.String("key", sr.Key),
-	))
-	defer span.End()
-
 	resp, err := s.server.Stat(ctx, sr)
-	if err != nil {
-		span.RecordError(err)
-	}
 	return resp, err
 }
 
 func (s *TracingSnapshotter) Update(ctx context.Context, sr *snapshotsapi.UpdateSnapshotRequest) (*snapshotsapi.UpdateSnapshotResponse, error) {
-	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.Update", trace.WithAttributes(
+	ctx, span := GetDefaultTracer().Start(ctx, "snapshotter.Update", trace.WithAttributes(
 		attribute.String("name", sr.Info.Name),
 	))
 	defer span.End()
@@ -139,7 +128,7 @@ func (s *TracingSnapshotter) Update(ctx context.Context, sr *snapshotsapi.Update
 }
 
 func (s *TracingSnapshotter) List(sr *snapshotsapi.ListSnapshotsRequest, ss snapshotsapi.Snapshots_ListServer) error {
-	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ss.Context(), "snapshotter.List")
+	ctx, span := GetDefaultTracer().Start(ss.Context(), "snapshotter.List")
 	defer span.End()
 
 	err := s.server.List(sr, &tracingListServer{
@@ -162,26 +151,12 @@ func (t *tracingListServer) Context() context.Context {
 }
 
 func (s *TracingSnapshotter) Usage(ctx context.Context, ur *snapshotsapi.UsageRequest) (*snapshotsapi.UsageResponse, error) {
-	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.Usage", trace.WithAttributes(
-		attribute.String("key", ur.Key),
-	))
-	defer span.End()
-
 	resp, err := s.server.Usage(ctx, ur)
-	if err != nil {
-		span.RecordError(err)
-	}
-	if resp != nil {
-		span.SetAttributes(
-			attribute.Int64("inodes", resp.Inodes),
-			attribute.Int64("size", resp.Size),
-		)
-	}
 	return resp, err
 }
 
 func (s *TracingSnapshotter) Cleanup(ctx context.Context, cr *snapshotsapi.CleanupRequest) (*ptypes.Empty, error) {
-	ctx, span := otel.GetTracerProvider().Tracer(tracerName).Start(ctx, "snapshotter.Cleanup")
+	ctx, span := GetDefaultTracer().Start(ctx, "snapshotter.Cleanup")
 	defer span.End()
 
 	resp, err := s.server.Cleanup(ctx, cr)

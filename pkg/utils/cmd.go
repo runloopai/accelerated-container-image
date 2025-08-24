@@ -26,9 +26,12 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/containerd/accelerated-container-image/pkg/tracing"
 	sn "github.com/containerd/accelerated-container-image/pkg/types"
 	"github.com/containerd/log"
 	"github.com/pkg/errors"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -83,6 +86,12 @@ var defaultServiceTemplate = `
 `
 
 func Create(ctx context.Context, dir string, opts ...string) error {
+	ctx, span := tracing.GetDefaultTracer().Start(ctx, "util.cmd.Create", trace.WithAttributes(
+		attribute.String("dir", dir),
+		attribute.StringSlice("opts", opts),
+	))
+	defer span.End()
+
 	dataPath := path.Join(dir, dataFile)
 	indexPath := path.Join(dir, idxFile)
 	os.RemoveAll(dataPath)
@@ -91,12 +100,19 @@ func Create(ctx context.Context, dir string, opts ...string) error {
 	log.G(ctx).Debugf("%s %s", obdBinCreate, strings.Join(args, " "))
 	out, err := exec.CommandContext(ctx, obdBinCreate, args...).CombinedOutput()
 	if err != nil {
+		span.RecordError(err)
 		return errors.Wrapf(err, "failed to overlaybd-create: %s", out)
 	}
 	return nil
 }
 
 func Seal(ctx context.Context, dir, toDir string, opts ...string) error {
+	ctx, span := tracing.GetDefaultTracer().Start(ctx, "util.cmd.Seal", trace.WithAttributes(
+		attribute.String("dir", dir),
+		attribute.StringSlice("opts", opts),
+	))
+	defer span.End()
+
 	args := append([]string{
 		"--seal",
 		path.Join(dir, dataFile),
@@ -105,9 +121,11 @@ func Seal(ctx context.Context, dir, toDir string, opts ...string) error {
 	log.G(ctx).Debugf("%s %s", obdBinCommit, strings.Join(args, " "))
 	out, err := exec.CommandContext(ctx, obdBinCommit, args...).CombinedOutput()
 	if err != nil {
+		span.RecordError(err)
 		return errors.Wrapf(err, "failed to seal writable overlaybd: %s", out)
 	}
 	if err := os.Rename(path.Join(dir, dataFile), path.Join(toDir, sealedFile)); err != nil {
+		span.RecordError(err)
 		return errors.Wrapf(err, "failed to rename sealed overlaybd file")
 	}
 	os.RemoveAll(path.Join(dir, idxFile))
@@ -115,6 +133,14 @@ func Seal(ctx context.Context, dir, toDir string, opts ...string) error {
 }
 
 func Commit(ctx context.Context, dir, toDir string, sealed bool, opts ...string) error {
+	ctx, span := tracing.GetDefaultTracer().Start(ctx, "util.cmd.Commit", trace.WithAttributes(
+		attribute.String("dir", dir),
+		attribute.String("toDir", toDir),
+		attribute.Bool("sealed", sealed),
+		attribute.StringSlice("opts", opts),
+	))
+	defer span.End()
+
 	var args []string
 	if sealed {
 		args = append([]string{
@@ -132,15 +158,25 @@ func Commit(ctx context.Context, dir, toDir string, sealed bool, opts ...string)
 	log.G(ctx).Debugf("%s %s", obdBinCommit, strings.Join(args, " "))
 	out, err := exec.CommandContext(ctx, obdBinCommit, args...).CombinedOutput()
 	if err != nil {
+		span.RecordError(err)
 		return errors.Wrapf(err, "failed to overlaybd-commit: %s", out)
 	}
 	if sealed {
-		return os.Rename(path.Join(toDir, commitTempFile), path.Join(toDir, commitFile))
+		err := os.Rename(path.Join(toDir, commitTempFile), path.Join(toDir, commitFile))
+		if err != nil {
+			span.RecordError(err)
+		}
+		return err
 	}
 	return nil
 }
 
 func ApplyOverlaybd(ctx context.Context, dir string, opts ...string) error {
+	ctx, span := tracing.GetDefaultTracer().Start(ctx, "util.cmd.ApplyOverlaybd", trace.WithAttributes(
+		attribute.String("dir", dir),
+		attribute.StringSlice("opts", opts),
+	))
+	defer span.End()
 
 	args := append([]string{
 		path.Join(dir, "layer.tar"),
@@ -148,12 +184,18 @@ func ApplyOverlaybd(ctx context.Context, dir string, opts ...string) error {
 	log.G(ctx).Debugf("%s %s", obdBinApply, strings.Join(args, " "))
 	out, err := exec.CommandContext(ctx, obdBinApply, args...).CombinedOutput()
 	if err != nil {
+		span.RecordError(err)
 		return errors.Wrapf(err, "failed to overlaybd-apply[native]: %s", out)
 	}
 	return nil
 }
 
 func ApplyTurboOCI(ctx context.Context, dir, gzipMetaFile string, opts ...string) error {
+	ctx, span := tracing.GetDefaultTracer().Start(ctx, "util.cmd.ApplyTurboOCI", trace.WithAttributes(
+		attribute.String("dir", dir),
+		attribute.StringSlice("opts", opts),
+	))
+	defer span.End()
 
 	args := append([]string{
 		path.Join(dir, "layer.tar"),
@@ -162,20 +204,28 @@ func ApplyTurboOCI(ctx context.Context, dir, gzipMetaFile string, opts ...string
 	log.G(ctx).Debugf("%s %s", obdBinApply, strings.Join(args, " "))
 	out, err := exec.CommandContext(ctx, obdBinTurboOCIApply, args...).CombinedOutput()
 	if err != nil {
+		span.RecordError(err)
 		return errors.Wrapf(err, "failed to overlaybd-apply[turboOCI]: %s", out)
 	}
 	return nil
 }
 
 func GenerateTarMeta(ctx context.Context, srcTarFile string, dstTarMeta string) error {
+	ctx, span := tracing.GetDefaultTracer().Start(ctx, "util.cmd.Create", trace.WithAttributes(
+		attribute.String("srcTarFile", srcTarFile),
+		attribute.String("dstTarMeta", dstTarMeta),
+	))
+	defer span.End()
 
 	if _, err := os.Stat(srcTarFile); os.IsNotExist(err) {
 		return nil
 	} else if err != nil {
+		span.RecordError(err)
 		return fmt.Errorf("error stating tar file: %w", err)
 	}
 	log.G(ctx).Infof("generate layer meta for %s", srcTarFile)
 	if err := exec.Command(obdBinTurboOCIApply, srcTarFile, dstTarMeta, "--export").Run(); err != nil {
+		span.RecordError(err)
 		return fmt.Errorf("failed to convert tar file to overlaybd device: %w", err)
 	}
 	return nil
@@ -183,11 +233,18 @@ func GenerateTarMeta(ctx context.Context, srcTarFile string, dstTarMeta string) 
 
 // ConvertLayer produce a turbooci layer, target is path of ext4.fs.meta
 func ConvertLayer(ctx context.Context, opt *ConvertOption, fs_type string) error {
+	ctx, span := tracing.GetDefaultTracer().Start(ctx, "util.cmd.Create", trace.WithAttributes(
+		attribute.String("opt.Workdir", opt.Workdir),
+		attribute.String("fs_type", fs_type),
+	))
+	defer span.End()
+
 	if opt.Workdir == "" {
 		opt.Workdir = "tmp_conv"
 	}
 
 	if err := os.MkdirAll(opt.Workdir, 0755); err != nil {
+		span.RecordError(err)
 		return fmt.Errorf("failed to create work dir: %w", err)
 	}
 
@@ -203,10 +260,12 @@ func ConvertLayer(ctx context.Context, opt *ConvertOption, fs_type string) error
 		args = append(args, "--mkfs")
 	}
 	if out, err := exec.CommandContext(ctx, obdBinCreate, args...).CombinedOutput(); err != nil {
+		span.RecordError(err)
 		return fmt.Errorf("failed to overlaybd-create: %w, output: %s", err, out)
 	}
 	file, err := os.Create(pathFakeTarget)
 	if err != nil {
+		span.RecordError(err)
 		return fmt.Errorf("failed to create fake target: %w", err)
 	}
 	file.Close()
@@ -220,13 +279,16 @@ func ConvertLayer(ctx context.Context, opt *ConvertOption, fs_type string) error
 	if err := os.WriteFile(pathService, []byte(fmt.Sprintf(defaultServiceTemplate,
 		filepath.Join(opt.Workdir, "cache"))), 0644,
 	); err != nil {
+		span.RecordError(err)
 		return fmt.Errorf("failed to write service.json: %w", err)
 	}
 	configBytes, err := json.Marshal(opt.Config)
 	if err != nil {
+		span.RecordError(err)
 		return fmt.Errorf("failed to marshal overlaybd config: %w", err)
 	}
 	if err := os.WriteFile(pathConfig, configBytes, 0644); err != nil {
+		span.RecordError(err)
 		return fmt.Errorf("failed to write overlaybd config: %w", err)
 	}
 	args = []string{
@@ -242,6 +304,7 @@ func ConvertLayer(ctx context.Context, opt *ConvertOption, fs_type string) error
 	if out, err := exec.CommandContext(ctx, obdBinTurboOCIApply,
 		args...,
 	).CombinedOutput(); err != nil {
+		span.RecordError(err)
 		return fmt.Errorf("failed to turboOCI-apply: %w, output: %s", err, out)
 	}
 
@@ -252,6 +315,7 @@ func ConvertLayer(ctx context.Context, opt *ConvertOption, fs_type string) error
 		opt.Ext4FSMetaPath,
 		"-z", "--turboOCI",
 	).CombinedOutput(); err != nil {
+		span.RecordError(err)
 		return fmt.Errorf("failed to overlaybd-commit: %w, output: %s", err, out)
 	}
 	return nil
