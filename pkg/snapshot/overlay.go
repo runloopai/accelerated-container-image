@@ -31,6 +31,9 @@ import (
 
 	"github.com/containerd/accelerated-container-image/pkg/label"
 	"github.com/containerd/accelerated-container-image/pkg/snapshot/diskquota"
+	"github.com/containerd/accelerated-container-image/pkg/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	mylog "github.com/containerd/accelerated-container-image/internal/log"
 	"github.com/containerd/accelerated-container-image/pkg/metrics"
@@ -448,7 +451,6 @@ func (o *snapshotter) isPrepareRootfs(info snapshots.Info) bool {
 }
 
 func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind, key string, parent string, opts ...snapshots.Opt) (_ []mount.Mount, retErr error) {
-
 	ctx, t, err := o.ms.TransactionContext(ctx, true)
 	if err != nil {
 		return nil, err
@@ -550,6 +552,7 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 		if err != nil {
 			return nil, err
 		}
+		trace.SpanFromContext(ctx).AddEvent("identifyStorageType", trace.WithAttributes(attribute.Int("stype", int(stype))))
 
 		// Download blob
 		downloadBlob := info.Labels[label.DownloadRemoteBlob]
@@ -994,6 +997,12 @@ func (o *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 }
 
 func (o *snapshotter) commit(ctx context.Context, name, key string, opts ...snapshots.Opt) (string, snapshots.Info, error) {
+	ctx, span := tracing.GetDefaultTracer().Start(ctx, "snapshotter.commit", trace.WithAttributes(
+		attribute.String("snapshot_name", name),
+		attribute.String("key", key),
+	))
+	defer span.End()
+
 	id, _, _, err := storage.GetInfo(ctx, key)
 	if err != nil {
 		return "", snapshots.Info{}, err
@@ -1380,6 +1389,12 @@ func (o *snapshotter) getDiskQuotaSize(info *snapshots.Info) string {
 }
 
 func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, key, parent string, opts []snapshots.Opt) (_ string, _ snapshots.Info, err error) {
+	ctx, span := tracing.GetDefaultTracer().Start(ctx, "snapshotter.createSnapshot", trace.WithAttributes(
+		attribute.String("kind", kind.String()),
+		attribute.String("parent", parent),
+	))
+	defer span.End()
+
 	var td, path string
 	defer func() {
 		if err != nil {

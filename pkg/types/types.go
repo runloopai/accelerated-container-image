@@ -24,6 +24,7 @@ type OverlayBDBSConfig struct {
 	ResultFile        string                   `json:"resultFile"`
 	AccelerationLayer bool                     `json:"accelerationLayer,omitempty"`
 	RecordTracePath   string                   `json:"recordTracePath,omitempty"`
+	TraceContext      map[string]string        `json:"traceContext,omitempty"`
 }
 
 // OverlayBDBSConfigLower

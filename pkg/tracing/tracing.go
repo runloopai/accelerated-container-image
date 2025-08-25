@@ -13,7 +13,10 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+	"go.opentelemetry.io/otel/trace"
 )
+
+const tracerName = "accelerated-container-image/snapshotter"
 
 var (
 	serviceName = os.Getenv("OTEL_SERVICE_NAME")
@@ -61,4 +64,8 @@ func InitTracer(ctx context.Context) (func(context.Context) error, error) {
 
 	// Return shutdown function
 	return tp.Shutdown, nil
+}
+
+func GetDefaultTracer() trace.Tracer {
+	return otel.GetTracerProvider().Tracer(tracerName)
 }

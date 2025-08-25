@@ -33,6 +33,8 @@ import (
 	"time"
 
 	sn "github.com/containerd/accelerated-container-image/pkg/types"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/containerd/accelerated-container-image/pkg/label"
 	"github.com/containerd/accelerated-container-image/pkg/utils"
@@ -503,9 +505,12 @@ func (o *snapshotter) constructOverlayBDSpec(ctx context.Context, key string, wr
 		return errors.Wrapf(err, "failed to identify storage of snapshot %s", key)
 	}
 
+	var carrier = propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
 	configJSON := sn.OverlayBDBSConfig{
-		Lowers:     []sn.OverlayBDBSConfigLower{},
-		ResultFile: o.overlaybdInitDebuglogPath(id),
+		Lowers:       []sn.OverlayBDBSConfigLower{},
+		ResultFile:   o.overlaybdInitDebuglogPath(id),
+		TraceContext: carrier,
 	}
 
 	// load the parent's config and reuse the lowerdir
