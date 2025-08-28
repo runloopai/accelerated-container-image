@@ -413,8 +413,26 @@ func (o *snapshotter) getWritableType(ctx context.Context, id string, info snaps
 			log.G(ctx).Debugf("OverlayBD labels detected for snapshot %s - using overlaybd (rwMode: %s)", id, o.rwMode)
 			return rwMode(o.rwMode)
 		}
+
 		// Fallback to checking the filesystem if labels are not present
-		stype, err := o.identifySnapshotStorageType(ctx, id, info)
+		// For write capability decisions, check the parent's storage type directly
+		var stype storageType
+		var err error
+		if id != "" && info.Parent != "" && o.isPrepareRootfs(info) {
+			// Get parent info and check its storage type
+			if _, parentInfo, _, err := storage.GetInfo(ctx, info.Parent); err == nil {
+				log.G(ctx).Debugf("getWritableType: checking parent snapshot %s for overlaybd format (child: %s)", id, info.Name)
+				stype, err = o.identifySnapshotStorageType(ctx, id, parentInfo)
+			} else {
+				// Fallback in case of error - probably should not happen.
+				log.G(ctx).Warnf("getWritableType: failed to get parent info for %s, checking child info: %v", info.Parent, err)
+				stype, err = o.identifySnapshotStorageType(ctx, id, info)
+			}
+		} else {
+			// Standard case: check the snapshot's own storage type
+			stype, err = o.identifySnapshotStorageType(ctx, id, info)
+		}
+
 		if err == nil && (stype == storageTypeLocalBlock || stype == storageTypeRemoteBlock) {
 			log.G(ctx).Debugf("OverlayBD filesystem detected for snapshot %s - using overlaybd (rwMode: %s)", id, o.rwMode)
 			return rwMode(o.rwMode)
