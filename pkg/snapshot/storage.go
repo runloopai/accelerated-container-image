@@ -309,6 +309,10 @@ func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string
 			targetPath, fmt.Sprintf("max_data_area_mb=%d", obdMaxDataAreaMB))
 	}
 
+	// Writing "1" to enable triggers synchronous TCMU/overlaybd device bring-up.
+	// The kernel sets up the target and completes a userspace handshake with
+	// tcmu-runner/overlaybd (reading config, opening files, allocating buffers).
+	// Under CPU/IO load this can block for a few hundred milliseconds before returning.
 	trace.SpanFromContext(ctx).AddEvent("configfs.enable.start")
 	enableStart := time.Now()
 	err = os.WriteFile(path.Join(targetPath, "enable"), ([]byte)("1"), 0666)
