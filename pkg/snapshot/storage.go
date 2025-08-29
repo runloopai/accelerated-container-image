@@ -313,9 +313,12 @@ func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string
 	// The kernel sets up the target and completes a userspace handshake with
 	// tcmu-runner/overlaybd (reading config, opening files, allocating buffers).
 	// Under CPU/IO load this can block for a few hundred milliseconds before returning.
-	trace.SpanFromContext(ctx).AddEvent("configfs.enable.start")
-	enableStart := time.Now()
+	_, enableSpan := tracing.GetDefaultTracer().Start(ctx, "configfs.enable", trace.WithAttributes(
+		attribute.String("targetPath", targetPath),
+	))
+
 	err = os.WriteFile(path.Join(targetPath, "enable"), ([]byte)("1"), 0666)
+	enableSpan.End()
 	if err != nil {
 		// read the init-debug.log for readable
 		debugLogPath := o.overlaybdInitDebuglogPath(snID)
@@ -324,9 +327,6 @@ func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string
 		}
 		return errors.Wrapf(err, "failed to enable target for %s", targetPath)
 	}
-	trace.SpanFromContext(ctx).AddEvent("configfs.enable.done", trace.WithAttributes(
-		attribute.Float64("duration_ms", float64(time.Since(enableStart).Milliseconds())),
-	))
 
 	// fixed by fuweid
 	err = os.WriteFile(
