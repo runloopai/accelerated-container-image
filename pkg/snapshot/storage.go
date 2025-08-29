@@ -313,19 +313,23 @@ func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string
 	// The kernel sets up the target and completes a userspace handshake with
 	// tcmu-runner/overlaybd (reading config, opening files, allocating buffers).
 	// Under CPU/IO load this can block for a few hundred milliseconds before returning.
-	_, enableSpan := tracing.GetDefaultTracer().Start(ctx, "configfs.enable", trace.WithAttributes(
-		attribute.String("targetPath", targetPath),
-	))
+	{
+		_, enableSpan := tracing.GetDefaultTracer().Start(ctx, "configfs.enable", trace.WithAttributes(
+			attribute.String("targetPath", targetPath),
+		))
+		defer enableSpan.End()
 
-	err = os.WriteFile(path.Join(targetPath, "enable"), ([]byte)("1"), 0666)
-	enableSpan.End()
-	if err != nil {
-		// read the init-debug.log for readable
-		debugLogPath := o.overlaybdInitDebuglogPath(snID)
-		if data, derr := os.ReadFile(debugLogPath); derr == nil {
-			return errors.Errorf("failed to enable target for %s, %s", targetPath, data)
+		err = os.WriteFile(path.Join(targetPath, "enable"), ([]byte)("1"), 0666)
+		if err != nil {
+			enableSpan.RecordError(err)
+			enableSpan.SetAttributes(attribute.String("error", err.Error()))
+			// read the init-debug.log for readable
+			debugLogPath := o.overlaybdInitDebuglogPath(snID)
+			if data, derr := os.ReadFile(debugLogPath); derr == nil {
+				return errors.Errorf("failed to enable target for %s, %s", targetPath, data)
+			}
+			return errors.Wrapf(err, "failed to enable target for %s", targetPath)
 		}
-		return errors.Wrapf(err, "failed to enable target for %s", targetPath)
 	}
 
 	// fixed by fuweid
