@@ -309,6 +309,8 @@ func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string
 			targetPath, fmt.Sprintf("max_data_area_mb=%d", obdMaxDataAreaMB))
 	}
 
+	trace.SpanFromContext(ctx).AddEvent("configfs.enable.start")
+	enableStart := time.Now()
 	err = os.WriteFile(path.Join(targetPath, "enable"), ([]byte)("1"), 0666)
 	if err != nil {
 		// read the init-debug.log for readable
@@ -318,6 +320,9 @@ func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string
 		}
 		return errors.Wrapf(err, "failed to enable target for %s", targetPath)
 	}
+	trace.SpanFromContext(ctx).AddEvent("configfs.enable.done", trace.WithAttributes(
+		attribute.Float64("duration_ms", float64(time.Since(enableStart).Milliseconds())),
+	))
 
 	// fixed by fuweid
 	err = os.WriteFile(
@@ -388,6 +393,8 @@ func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string
 		return errors.Wrapf(err, "failed to read loopback address for %s", devAddressPath)
 	}
 	deviceNumber := strings.TrimSuffix(string(bytes), "\n")
+
+	////////////////////////////////////////
 
 	// The device doesn't show up instantly. Need retry here.
 	var lastErr error = nil
