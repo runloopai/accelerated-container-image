@@ -291,7 +291,14 @@ func (o *snapshotter) Stat(ctx context.Context, key string) (_ snapshots.Info, r
 		}
 		metrics.GRPCLatency.WithLabelValues("Stat").Observe(time.Since(start).Seconds())
 	}()
+	msStart := time.Now()
+	trace.SpanFromContext(ctx).AddEvent("metastore.begin.start", trace.WithAttributes(
+		attribute.Bool("writable", false),
+	))
 	ctx, t, err := o.ms.TransactionContext(ctx, false)
+	trace.SpanFromContext(ctx).AddEvent("metastore.begin.read.done", trace.WithAttributes(
+		attribute.Float64("duration_ms", float64(time.Since(msStart).Milliseconds())),
+	))
 	if err != nil {
 		return snapshots.Info{}, err
 	}
@@ -319,7 +326,14 @@ func (o *snapshotter) Update(ctx context.Context, info snapshots.Info, fieldpath
 		metrics.GRPCLatency.WithLabelValues("Update").Observe(time.Since(start).Seconds())
 	}()
 
+	msStart := time.Now()
+	trace.SpanFromContext(ctx).AddEvent("metastore.begin.start", trace.WithAttributes(
+		attribute.Bool("writable", true),
+	))
 	ctx, t, err := o.ms.TransactionContext(ctx, true)
+	trace.SpanFromContext(ctx).AddEvent("metastore.begin.write.done", trace.WithAttributes(
+		attribute.Float64("duration_ms", float64(time.Since(msStart).Milliseconds())),
+	))
 	if err != nil {
 		return snapshots.Info{}, err
 	}
@@ -347,7 +361,14 @@ func (o *snapshotter) Usage(ctx context.Context, key string) (_ snapshots.Usage,
 		metrics.GRPCLatency.WithLabelValues("Usage").Observe(time.Since(start).Seconds())
 	}()
 
+	msStart := time.Now()
+	trace.SpanFromContext(ctx).AddEvent("metastore.begin.start", trace.WithAttributes(
+		attribute.Bool("writable", false),
+	))
 	ctx, t, err := o.ms.TransactionContext(ctx, false)
+	trace.SpanFromContext(ctx).AddEvent("metastore.begin.read.done", trace.WithAttributes(
+		attribute.Float64("duration_ms", float64(time.Since(msStart).Milliseconds())),
+	))
 	if err != nil {
 		return snapshots.Usage{}, err
 	}
@@ -469,7 +490,22 @@ func (o *snapshotter) isPrepareRootfs(info snapshots.Info) bool {
 }
 
 func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind, key string, parent string, opts ...snapshots.Opt) (_ []mount.Mount, retErr error) {
+	ctx, span := tracing.GetDefaultTracer().Start(ctx, "snapshotter.createMountPoint", trace.WithAttributes(
+		attribute.String("kind", kind.String()),
+		attribute.String("key", key),
+		attribute.String("parent", parent),
+	))
+	defer span.End()
+
+	msStart := time.Now()
+	trace.SpanFromContext(ctx).AddEvent("metastore.begin.start", trace.WithAttributes(
+		attribute.Bool("writable", true),
+	))
 	ctx, t, err := o.ms.TransactionContext(ctx, true)
+	trace.SpanFromContext(ctx).AddEvent("metastore.begin.done", trace.WithAttributes(
+		attribute.Bool("writable", true),
+		attribute.Float64("duration_ms", float64(time.Since(msStart).Milliseconds())),
+	))
 	if err != nil {
 		return nil, err
 	}
@@ -483,10 +519,20 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 		}
 	}()
 
+	// Add detailed timing around pre-snapshot filesystem setup that happens before createSnapshot
+	fsPrepStart := time.Now()
+
+	trace.SpanFromContext(ctx).AddEvent("before.createSnapshot", trace.WithAttributes(
+		attribute.String("kind", kind.String()),
+		attribute.String("parent", parent),
+	))
 	id, info, err := o.createSnapshot(ctx, kind, key, parent, opts)
 	if err != nil {
 		return nil, err
 	}
+	trace.SpanFromContext(ctx).AddEvent("after.createSnapshot", trace.WithAttributes(
+		attribute.Float64("duration_ms", float64(time.Since(fsPrepStart).Milliseconds())),
+	))
 	// Extract image reference for logging
 	imageRef := ""
 	if img, ok := info.Labels[label.CRIImageRef]; ok {
@@ -496,6 +542,10 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 	}
 
 	log.G(ctx).Debugf("Creating snapshot %s for image: %s", id, imageRef)
+	trace.SpanFromContext(ctx).SetAttributes(
+		attribute.String("snapshot_id", id),
+		attribute.String("image_ref", imageRef),
+	)
 
 	hasOverlayBDBlob := false
 	hasImageRef := false
@@ -762,6 +812,12 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 // Prepare creates an active snapshot identified by key descending from the provided parent.
 func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...snapshots.Opt) (_ []mount.Mount, retErr error) {
 	log.G(ctx).Infof("Prepare (key: %s, parent: %s)", key, parent)
+	ctx, span := tracing.GetDefaultTracer().Start(ctx, "snapshotter.Prepare", trace.WithAttributes(
+		attribute.String("key", key),
+		attribute.String("parent", parent),
+		attribute.Int("opts_count", len(opts)),
+	))
+	defer span.End()
 
 	// Extract labels from opts to see what's being passed to us.
 	var allLabels map[string]string
@@ -780,6 +836,7 @@ func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 	// Log what we received from containerd
 	if len(allLabels) > 0 {
 		log.G(ctx).Debugf("Prepare: Received %d labels from containerd", len(allLabels))
+		span.SetAttributes(attribute.Int("labels_count", len(allLabels)))
 	} else {
 		log.G(ctx).Debugf("Prepare: No labels received from containerd (opts count: %d)", len(opts))
 	}
@@ -834,7 +891,11 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) (_ []mount.Mount, 
 		}
 		metrics.GRPCLatency.WithLabelValues("Mounts").Observe(time.Since(start).Seconds())
 	}()
+	msStart := time.Now()
 	ctx, t, err := o.ms.TransactionContext(ctx, false)
+	trace.SpanFromContext(ctx).AddEvent("metastore.begin.read.done", trace.WithAttributes(
+		attribute.Float64("duration_ms", float64(time.Since(msStart).Milliseconds())),
+	))
 	if err != nil {
 		return nil, err
 	}
@@ -911,7 +972,11 @@ func (o *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 		metrics.GRPCLatency.WithLabelValues("Commit").Observe(time.Since(start).Seconds())
 	}()
 
+	msStart := time.Now()
 	ctx, t, err := o.ms.TransactionContext(ctx, true)
+	trace.SpanFromContext(ctx).AddEvent("metastore.begin.write.done", trace.WithAttributes(
+		attribute.Float64("duration_ms", float64(time.Since(msStart).Milliseconds())),
+	))
 	if err != nil {
 		return err
 	}
@@ -1432,17 +1497,28 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 
 	snapshotDir := filepath.Join(o.root, "snapshots")
 
+	prepStart := time.Now()
+	trace.SpanFromContext(ctx).AddEvent("fs.prepareDirectory.start")
 	td, err = o.prepareDirectory(ctx, snapshotDir, kind)
 	if err != nil {
 		return "", snapshots.Info{}, errors.Wrap(err, "failed to create prepare snapshot dir")
 	}
+	trace.SpanFromContext(ctx).AddEvent("fs.prepareDirectory.done", trace.WithAttributes(
+		attribute.Float64("duration_ms", float64(time.Since(prepStart).Milliseconds())),
+	))
 
+	dbStart := time.Now()
+	trace.SpanFromContext(ctx).AddEvent("db.CreateSnapshot.start")
 	s, err := storage.CreateSnapshot(ctx, kind, key, parent, opts...)
 	if err != nil {
 		return "", snapshots.Info{}, errors.Wrap(err, "failed to create snapshot")
 	}
+	trace.SpanFromContext(ctx).AddEvent("db.CreateSnapshot.done", trace.WithAttributes(
+		attribute.Float64("duration_ms", float64(time.Since(dbStart).Milliseconds())),
+	))
 
 	if len(s.ParentIDs) > 0 {
+		parentStart := time.Now()
 		st, err := os.Stat(o.upperPath(s.ParentIDs[0]))
 		if err != nil {
 			return "", snapshots.Info{}, errors.Wrap(err, "failed to stat parent")
@@ -1452,6 +1528,9 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 		if err := os.Lchown(filepath.Join(td, "fs"), int(stat.Uid), int(stat.Gid)); err != nil {
 			return "", snapshots.Info{}, errors.Wrap(err, "failed to chown")
 		}
+		trace.SpanFromContext(ctx).AddEvent("fs.parent.stat_lchown.done", trace.WithAttributes(
+			attribute.Float64("duration_ms", float64(time.Since(parentStart).Milliseconds())),
+		))
 	}
 	// _, tmpinfo, _, err := storage.GetInfo(ctx, key)
 	id, info, _, err := storage.GetInfo(ctx, key)
@@ -1459,22 +1538,34 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 		if diskQuotaSize := o.getDiskQuotaSize(&info); diskQuotaSize != "" {
 			log.G(ctx).Infof("set usage quota %s for rootfs(sn: %s)", diskQuotaSize, s.ID)
 			upperPath := filepath.Join(td, "fs")
+			quotaStart := time.Now()
 			if err := o.setDiskQuota(ctx, upperPath, diskQuotaSize, diskquota.QuotaMinID); err != nil {
 				return "", snapshots.Info{}, errors.Wrapf(err, "failed to set diskquota on upperpath, snapshot id: %s", s.ID)
 			}
+			trace.SpanFromContext(ctx).AddEvent("diskquota.upper.done", trace.WithAttributes(
+				attribute.Float64("duration_ms", float64(time.Since(quotaStart).Milliseconds())),
+			))
 			// if there's no parent, we just return a bind mount, so no need to set quota on workerpath
 			if len(s.ParentIDs) > 0 {
 				workpath := filepath.Join(td, "work")
+				quotaWorkStart := time.Now()
 				if err := o.setDiskQuota(ctx, workpath, diskQuotaSize, diskquota.QuotaMinID); err != nil {
 					return "", snapshots.Info{}, errors.Wrapf(err, "failed to set diskquota on workpath, snapshot id: %s", s.ID)
 				}
+				trace.SpanFromContext(ctx).AddEvent("diskquota.work.done", trace.WithAttributes(
+					attribute.Float64("duration_ms", float64(time.Since(quotaWorkStart).Milliseconds())),
+				))
 			}
 		}
 	}
 	path = filepath.Join(snapshotDir, s.ID)
+	renStart := time.Now()
 	if err = os.Rename(td, path); err != nil {
 		return "", snapshots.Info{}, errors.Wrap(err, "failed to rename")
 	}
+	trace.SpanFromContext(ctx).AddEvent("fs.rename.done", trace.WithAttributes(
+		attribute.Float64("duration_ms", float64(time.Since(renStart).Milliseconds())),
+	))
 	td = ""
 	// id, info, _, err := storage.GetInfo(ctx, key)
 
@@ -1502,6 +1593,10 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 }
 
 func (o *snapshotter) identifySnapshotStorageType(ctx context.Context, id string, info snapshots.Info) (storageType, error) {
+	ctx, span := tracing.GetDefaultTracer().Start(ctx, "snapshotter.identifySnapshotStorageType", trace.WithAttributes(
+		attribute.String("snapshot_id", id),
+	))
+	defer span.End()
 	// Extract image reference for logging
 	imageRef := ""
 	if img, ok := info.Labels[label.CRIImageRef]; ok {
@@ -1521,6 +1616,7 @@ func (o *snapshotter) identifySnapshotStorageType(ctx context.Context, id string
 
 		if hasBDBlobSize && hasBDBlobDigest {
 			if hasRef || hasCriRef {
+				trace.SpanFromContext(ctx).AddEvent("identifyStorageType", trace.WithAttributes(attribute.String("identified", "remote_block")))
 				return storageTypeRemoteBlock, nil
 			} else {
 				log.G(ctx).Warnf("Image %s (snapshot %s) has overlaybd blob metadata (blob-size=%t, blob-digest=%t) but missing critical image reference labels (target-ref=%t, cri-ref=%t).",
@@ -1537,6 +1633,7 @@ func (o *snapshotter) identifySnapshotStorageType(ctx context.Context, id string
 	filePath := o.magicFilePath(id)
 	st, err := o.identifyLocalStorageType(filePath)
 	if err == nil {
+		trace.SpanFromContext(ctx).AddEvent("identifyStorageType", trace.WithAttributes(attribute.String("identified", "local_by_magic"), attribute.Int("stype", int(st))))
 		return st, nil
 	}
 	log.G(ctx).Debugf("failed to identify by magic file %s, error %v, try to identify by sealed file/writable_data", filePath, err)
@@ -1545,6 +1642,7 @@ func (o *snapshotter) identifySnapshotStorageType(ctx context.Context, id string
 	filePath = o.overlaybdSealedFilePath(id)
 	st, err = o.identifyLocalStorageType(filePath)
 	if err == nil {
+		trace.SpanFromContext(ctx).AddEvent("identifyStorageType", trace.WithAttributes(attribute.String("identified", "local_by_sealed"), attribute.Int("stype", int(st))))
 		return st, nil
 	}
 
@@ -1559,6 +1657,7 @@ func (o *snapshotter) identifySnapshotStorageType(ctx context.Context, id string
 	filePath = o.overlaybdOCILayerPath(id)
 	if _, err := os.Stat(filePath); err == nil {
 		log.G(ctx).Infof("uncompressed layer found in sn: %s", id)
+		trace.SpanFromContext(ctx).AddEvent("identifyStorageType", trace.WithAttributes(attribute.String("identified", "local_layer")))
 		return storageTypeLocalLayer, nil
 	}
 	if os.IsNotExist(err) {
@@ -1567,13 +1666,16 @@ func (o *snapshotter) identifySnapshotStorageType(ctx context.Context, id string
 		filePath = o.overlaybdConfPath(id)
 		if _, err := os.Stat(filePath); err == nil {
 			log.G(ctx).Debugf("%s/config.v1.json found, return storageTypeRemoteBlock", id)
+			trace.SpanFromContext(ctx).AddEvent("identifyStorageType", trace.WithAttributes(attribute.String("identified", "remote_by_conf")))
 			return storageTypeRemoteBlock, nil
 		}
 		log.G(ctx).Debugf("Falling back to normal storage type for snapshot %s", id)
+		trace.SpanFromContext(ctx).AddEvent("identifyStorageType", trace.WithAttributes(attribute.String("identified", "normal_fallback")))
 		return storageTypeNormal, nil
 	}
 
 	log.G(ctx).Debugf("storageType(sn: %s): %d", id, st)
+	span.SetAttributes(attribute.Int("stype", int(st)))
 
 	return st, err
 }

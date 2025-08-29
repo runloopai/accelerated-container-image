@@ -37,6 +37,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/containerd/accelerated-container-image/pkg/label"
+	"github.com/containerd/accelerated-container-image/pkg/tracing"
 	"github.com/containerd/accelerated-container-image/pkg/utils"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/mount"
@@ -50,6 +51,8 @@ import (
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sys/unix"
 )
 
@@ -256,10 +259,19 @@ func IsErofsFilesystem(path string) bool {
 //
 // TODO(fuweid): need to track the middle state if the process has been killed.
 func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string, writable string, fsType string, mkfs bool) (retErr error) {
+	ctx, span := tracing.GetDefaultTracer().Start(ctx, "snapshotter.attachAndMountBlockDevice", trace.WithAttributes(
+		attribute.String("snapshot_id", snID),
+		attribute.String("writable", writable),
+		attribute.String("fsType", fsType),
+		attribute.Bool("mkfs", mkfs),
+	))
+	defer span.End()
+
 	log.G(ctx).Debugf("Starting block device attachment for snapshot %s (writable: %s, fsType: %s)", snID, writable, fsType)
 
 	log.G(ctx).Debugf("lookup device mountpoint(%s) if exists before attach.", snID)
 	mountPoint := o.overlaybdMountpoint(snID)
+	trace.SpanFromContext(ctx).AddEvent("lookup_mountpoint", trace.WithAttributes(attribute.String("mountpoint", mountPoint)))
 	if err := lookup(mountPoint); err == nil {
 		log.G(ctx).Debugf("device mountpoint(%s) already exists, skip attach.", mountPoint)
 		return nil
@@ -270,6 +282,7 @@ func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string
 	}
 
 	targetPath := o.overlaybdTargetPath(snID)
+	trace.SpanFromContext(ctx).AddEvent("configfs_target_begin", trace.WithAttributes(attribute.String("targetPath", targetPath)))
 	err := os.MkdirAll(targetPath, 0700)
 	if err != nil {
 		return errors.Wrapf(err, "failed to create target dir for %s", targetPath)
@@ -379,6 +392,7 @@ func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string
 	// The device doesn't show up instantly. Need retry here.
 	var lastErr error = nil
 	for retry := 0; retry < maxAttachAttempts; retry++ {
+		trace.SpanFromContext(ctx).AddEvent("wait_block_device", trace.WithAttributes(attribute.Int("retry", retry)))
 		devDirs, err := os.ReadDir(o.scsiBlockDevicePath(deviceNumber))
 		if err != nil {
 			lastErr = err
@@ -414,6 +428,7 @@ func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string
 			}
 
 			if mkfs {
+				trace.SpanFromContext(ctx).AddEvent("mkfs_begin", trace.WithAttributes(attribute.String("fstype", fstype)))
 				args := []string{"-t", fstype}
 				if len(options) > 2 {
 					if options[2] != "" {
@@ -463,6 +478,7 @@ func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string
 					}
 					log.G(ctx).Infof("fs type: %s, mount options: %s, rw: %s, mountpoint: %s",
 						fstype, mountOpts, writable, mountPoint)
+					trace.SpanFromContext(ctx).AddEvent("mount_begin", trace.WithAttributes(attribute.String("fstype", fstype), attribute.String("mountOpts", mountOpts)))
 					if err := unix.Mount(device, mountPoint, fstype, mountFlag, mountOpts); err != nil {
 						lastErr = errors.Wrapf(err, "failed to mount %s to %s", device, mountPoint)
 						time.Sleep(10 * time.Millisecond)
@@ -478,6 +494,7 @@ func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string
 					}
 					args = append(args, device, mountPoint)
 					log.G(ctx).Infof("fs type: %s, mount options: %v", fstype, args)
+					trace.SpanFromContext(ctx).AddEvent("mount_begin", trace.WithAttributes(attribute.String("fstype", fstype), attribute.StringSlice("args", args)))
 					out, err := exec.CommandContext(ctx, "mount", args...).CombinedOutput()
 					if err != nil {
 						lastErr = errors.Wrapf(err, "failed to mount for dev %s: %s", device, out)
@@ -495,15 +512,23 @@ func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string
 
 // constructOverlayBDSpec generates the config spec for overlaybd target.
 func (o *snapshotter) constructOverlayBDSpec(ctx context.Context, key string, writable bool) error {
+	ctx, span := tracing.GetDefaultTracer().Start(ctx, "snapshotter.constructOverlayBDSpec", trace.WithAttributes(
+		attribute.String("key", key),
+		attribute.Bool("writable", writable),
+	))
+	defer span.End()
+
 	id, info, _, err := storage.GetInfo(ctx, key)
 	if err != nil {
 		return errors.Wrapf(err, "failed to get info for snapshot %s", key)
 	}
+	span.SetAttributes(attribute.String("snapshot_id", id))
 
 	stype, err := o.identifySnapshotStorageType(ctx, id, info)
 	if err != nil {
 		return errors.Wrapf(err, "failed to identify storage of snapshot %s", key)
 	}
+	span.SetAttributes(attribute.Int("storage_type", int(stype)))
 
 	var carrier = propagation.MapCarrier{}
 	otel.GetTextMapPropagator().Inject(ctx, carrier)
@@ -689,6 +714,7 @@ func (o *snapshotter) constructOverlayBDSpec(ctx context.Context, key string, wr
 			configJSON.Lowers = newLowers
 		}
 	}
+	span.SetAttributes(attribute.Int("lowers_count", len(configJSON.Lowers)))
 	configBuffer, _ := json.MarshalIndent(configJSON, "", "  ")
 	log.G(ctx).Infoln(string(configBuffer))
 	return o.atomicWriteOverlaybdTargetConfig(id, &configJSON)
