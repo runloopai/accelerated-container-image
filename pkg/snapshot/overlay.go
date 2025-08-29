@@ -670,7 +670,17 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 	stype := storageTypeNormal
 	writeType := o.getWritableType(ctx, parentID, info)
 
-	// If Preparing for rootfs, find metadata from its parent (top layer), launch and mount backstore device.
+	// Post-commit actions decided during preparation when rootfs
+	var doPrepareWritableSpec bool
+	var updateSpecParentIsAccel bool
+	var updateSpecNeedRecord bool
+	var updateSpecRecordPath string
+	var needAttach bool
+	var attachObdID string
+	var attachFsType string
+	var attachMkfs bool
+
+	// If Preparing for rootfs, find metadata from its parent (top layer), decide backstore actions.
 	if o.isPrepareRootfs(info) {
 
 		log.G(ctx).Infof("Preparing rootfs(%s). writeType: %s", s.ID, writeType)
@@ -682,15 +692,15 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 			}
 		}
 
+		// Decide actions; defer heavy operations until after we commit the metastore tx
+		attachMkfs = parent == ""
+
 		if writeType != RoDir {
 			if stype == storageTypeRemoteBlock || stype == storageTypeLocalBlock {
 				// If the parent is a remote or local block, use local block for the writable child layer.
 				log.G(ctx).Debugf("Using local block storage for writable snapshot %s (writeType: %s)", s.ID, writeType)
 				stype = storageTypeLocalBlock
-				if err := o.constructOverlayBDSpec(ctx, key, true); err != nil {
-					log.G(ctx).Errorln(err.Error())
-					return nil, err
-				}
+				doPrepareWritableSpec = true
 			} else {
 				// Fallback to normal overlayfs if the parent is not an overlaybd layer.
 				stype = storageTypeNormal
@@ -698,71 +708,35 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 			}
 		}
 
-		switch stype {
-		case storageTypeLocalBlock, storageTypeRemoteBlock:
+		if stype == storageTypeLocalBlock || stype == storageTypeRemoteBlock {
 			if parent != "" {
-				parentIsAccelLayer := parentInfo.Labels[label.AccelerationLayer] == "yes"
-				needRecordTrace := info.Labels[label.RecordTrace] == "yes"
-				recordTracePath := info.Labels[label.RecordTracePath]
+				updateSpecParentIsAccel = parentInfo.Labels[label.AccelerationLayer] == "yes"
+				updateSpecNeedRecord = info.Labels[label.RecordTrace] == "yes"
+				updateSpecRecordPath = info.Labels[label.RecordTracePath]
 				log.G(ctx).Infof("Prepare rootfs (sn: %s, parentIsAccelLayer: %t, needRecordTrace: %t, recordTracePath: %s)",
-					id, parentIsAccelLayer, needRecordTrace, recordTracePath)
-
-				if parentIsAccelLayer {
-					log.G(ctx).Infof("get accel-layer in parent (id: %s)", id)
-					// If parent is already an acceleration layer, there is certainly no need to record trace.
-					// Just mark this layer to get accelerated (trace replay)
-					err = o.updateSpec(parentID, true, "")
-					if writeType != RoDir {
-						o.updateSpec(id, true, "")
-					}
-				} else if needRecordTrace && recordTracePath != "" {
-					err = o.updateSpec(parentID, false, recordTracePath)
-					if writeType != RoDir {
-						o.updateSpec(id, false, recordTracePath)
-					}
-				} else {
-					// For the compatibility of images which have no accel layer
-					err = o.updateSpec(parentID, false, "")
-				}
-				if err != nil {
-					return nil, errors.Wrapf(err, "updateSpec failed for snapshot %s", parentID)
-				}
+					id, updateSpecParentIsAccel, updateSpecNeedRecord, updateSpecRecordPath)
 			}
 
-			var obdID string
+			// Decide attach parameters
 			var obdInfo *snapshots.Info
 			if writeType != RoDir {
-				obdID = id
+				attachObdID = id
 				obdInfo = &info
 			} else {
-				obdID = parentID
+				attachObdID = parentID
 				obdInfo = &parentInfo
 			}
 			fsType, ok := obdInfo.Labels[label.OverlayBDBlobFsType]
 			if !ok {
 				if isTurboOCI, _, _ := o.checkTurboOCI(obdInfo.Labels); isTurboOCI {
-					_, fsType = o.turboOCIFsMeta(obdID)
+					_, fsType = o.turboOCIFsMeta(attachObdID)
 				} else {
 					log.G(ctx).Warnf("cannot get fs type from label, %v, using %s", obdInfo.Labels, fsType)
 					fsType = o.defaultFsType
 				}
 			}
-			log.G(ctx).Debugf("attachAndMountBlockDevice (obdID: %s, writeType: %s, fsType %s, targetPath: %s)",
-				obdID, writeType, fsType, o.overlaybdTargetPath(obdID))
-			if err = o.attachAndMountBlockDevice(ctx, obdID, writeType, fsType, parent == ""); err != nil {
-				log.G(ctx).Errorf("%v", err)
-				return nil, errors.Wrapf(err, "failed to attach and mount for snapshot %v", obdID)
-			}
-
-			defer func() {
-				if retErr != nil && writeType == RwDir { // It's unnecessary to umount overlay block device if writeType == writeTypeRawDev
-					if rerr := mount.Unmount(o.overlaybdMountpoint(obdID), 0); rerr != nil {
-						log.G(ctx).WithError(rerr).Warnf("failed to umount writable block %s", o.overlaybdMountpoint(obdID))
-					}
-				}
-			}()
-		default:
-			// do nothing
+			attachFsType = fsType
+			needAttach = true
 		}
 	}
 	if _, writableBD := info.Labels[label.SupportReadWriteMode]; stype == storageTypeNormal && writableBD {
@@ -774,6 +748,55 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 	rollback = false
 	if err := t.Commit(); err != nil {
 		return nil, err
+	}
+
+	// Perform heavy operations outside the metastore write transaction
+	if o.isPrepareRootfs(info) {
+		// If we decided to prepare writable overlaybd (runs overlaybd-create), do it now
+		if doPrepareWritableSpec {
+			if err := o.constructOverlayBDSpec(ctx, key, true); err != nil {
+				return nil, err
+			}
+		}
+		// Update spec flags if needed
+		if stype == storageTypeLocalBlock || stype == storageTypeRemoteBlock {
+			if parent != "" {
+				if updateSpecParentIsAccel {
+					if err := o.updateSpec(parentID, true, ""); err != nil {
+						return nil, errors.Wrapf(err, "updateSpec failed for snapshot %s", parentID)
+					}
+					if writeType != RoDir {
+						_ = o.updateSpec(id, true, "")
+					}
+				} else if updateSpecNeedRecord && updateSpecRecordPath != "" {
+					if err := o.updateSpec(parentID, false, updateSpecRecordPath); err != nil {
+						return nil, errors.Wrapf(err, "updateSpec failed for snapshot %s", parentID)
+					}
+					if writeType != RoDir {
+						_ = o.updateSpec(id, false, updateSpecRecordPath)
+					}
+				} else if parent != "" {
+					if err := o.updateSpec(parentID, false, ""); err != nil {
+						return nil, errors.Wrapf(err, "updateSpec failed for snapshot %s", parentID)
+					}
+				}
+			}
+			// Attach and mount device if needed
+			if needAttach {
+				log.G(ctx).Debugf("attachAndMountBlockDevice (obdID: %s, writeType: %s, fsType %s, targetPath: %s)", attachObdID, writeType, attachFsType, o.overlaybdTargetPath(attachObdID))
+				if err = o.attachAndMountBlockDevice(ctx, attachObdID, writeType, attachFsType, attachMkfs); err != nil {
+					log.G(ctx).Errorf("%v", err)
+					return nil, errors.Wrapf(err, "failed to attach and mount for snapshot %v", attachObdID)
+				}
+				defer func() {
+					if retErr != nil && writeType == RwDir {
+						if rerr := mount.Unmount(o.overlaybdMountpoint(attachObdID), 0); rerr != nil {
+							log.G(ctx).WithError(rerr).Warnf("failed to umount writable block %s", o.overlaybdMountpoint(attachObdID))
+						}
+					}
+				}()
+			}
+		}
 	}
 
 	var m []mount.Mount

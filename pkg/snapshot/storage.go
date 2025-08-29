@@ -518,7 +518,15 @@ func (o *snapshotter) constructOverlayBDSpec(ctx context.Context, key string, wr
 	))
 	defer span.End()
 
-	id, info, _, err := storage.GetInfo(ctx, key)
+	// Use a fresh read transaction for storage.GetInfo calls to avoid using a potentially
+	// closed tx from outer scopes. This is safe because we only read metadata here.
+	ctxTx, t, err := o.ms.TransactionContext(ctx, false)
+	if err != nil {
+		return err
+	}
+	defer t.Rollback()
+
+	id, info, _, err := storage.GetInfo(ctxTx, key)
 	if err != nil {
 		return errors.Wrapf(err, "failed to get info for snapshot %s", key)
 	}
@@ -540,7 +548,7 @@ func (o *snapshotter) constructOverlayBDSpec(ctx context.Context, key string, wr
 
 	// load the parent's config and reuse the lowerdir
 	if info.Parent != "" {
-		parentID, _, _, err := storage.GetInfo(ctx, info.Parent)
+		parentID, _, _, err := storage.GetInfo(ctxTx, info.Parent)
 		if err != nil {
 			return errors.Wrapf(err, "failed to get info for parent snapshot %s", info.Parent)
 		}
