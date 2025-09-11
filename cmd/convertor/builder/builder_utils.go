@@ -57,14 +57,19 @@ func isRetryableError(err error) bool {
 	// Check for containerd docker error types
 	var dockerErr *docker.Error
 	if errors.As(err, &dockerErr) {
-		switch dockerErr.Code {
-		case docker.ErrorCodeTooManyRequests:
-			return true
-		case docker.ErrorCodeUnavailable:
-			return true
-		default:
-			return false
+		// When multiple errors are present, we consider the whole request
+		// retryable if any of the errors are retryable.
+		for _, errInfo := range dockerErr.Errors {
+			switch errInfo.Code {
+			case docker.ErrorCodeTooManyRequests, // 429
+				docker.ErrorCodeUnavailable: // 503
+				return true
+			// Most other 5xx errors are mapped to UNKNOWN.
+			case docker.ErrorCodeUnknown:
+				return true
+			}
 		}
+		return false
 	} else if err, ok := err.(net.Error); ok && err.Timeout() {
 		return true
 	}
