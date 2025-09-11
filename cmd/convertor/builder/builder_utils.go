@@ -35,6 +35,7 @@ import (
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
+	remoteerrors "github.com/containerd/containerd/v2/core/remotes/errors"
 	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	"github.com/containerd/continuity"
 	"github.com/containerd/errdefs"
@@ -54,18 +55,33 @@ func isRetryableError(err error) bool {
 		return false
 	}
 
-	// Check for containerd docker error types
-	var dockerErr *docker.Error
-	if errors.As(err, &dockerErr) {
-		switch dockerErr.Code {
-		case docker.ErrorCodeTooManyRequests:
-			return true
-		case docker.ErrorCodeUnavailable:
-			return true
-		default:
-			return false
+	// Registry may return multiple errors in one response (docker.Errors)
+	var regErrs docker.Errors
+	if errors.As(err, &regErrs) {
+		for _, e := range regErrs {
+			switch v := e.(type) {
+			case docker.ErrorCode:
+				if v == docker.ErrorCodeTooManyRequests || v == docker.ErrorCodeUnavailable || v == docker.ErrorCodeUnknown {
+					return true
+				}
+			case docker.Error:
+				if v.Code == docker.ErrorCodeTooManyRequests || v.Code == docker.ErrorCodeUnavailable || v.Code == docker.ErrorCodeUnknown {
+					return true
+				}
+			}
 		}
-	} else if err, ok := err.(net.Error); ok && err.Timeout() {
+	}
+
+	// Unexpected HTTP status codes (e.g., 429 or 5xx)
+	var us remoteerrors.ErrUnexpectedStatus
+	if errors.As(err, &us) {
+		if us.StatusCode == 429 || (us.StatusCode >= 500 && us.StatusCode <= 599) {
+			return true
+		}
+	}
+
+	// Network timeouts
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
 		return true
 	}
 
