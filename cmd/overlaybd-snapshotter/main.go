@@ -32,10 +32,16 @@ import (
 	"github.com/containerd/accelerated-container-image/pkg/metrics"
 	overlaybd "github.com/containerd/accelerated-container-image/pkg/snapshot"
 	"github.com/containerd/accelerated-container-image/pkg/tracing"
+	"github.com/containerd/errdefs"
 
+	diffapi "github.com/containerd/containerd/api/services/diff/v1"
 	snapshotsapi "github.com/containerd/containerd/api/services/snapshots/v1"
+	"github.com/containerd/containerd/v2/contrib/diffservice"
 	"github.com/containerd/containerd/v2/contrib/snapshotservice"
+	"github.com/containerd/containerd/v2/core/diff"
+	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/log"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
@@ -145,6 +151,7 @@ func main() {
 		grpc.UnaryInterceptor(requestIDInterceptor),
 	)
 	snapshotsapi.RegisterSnapshotsServer(srv, tracing.WithTracing(snapshotservice.FromSnapshotter(sn)))
+	diffapi.RegisterDiffServer(srv, diffservice.FromApplierAndComparer(notImplementedApplier{}, sn))
 
 	address := strings.TrimSpace(pconfig.Address)
 
@@ -239,4 +246,10 @@ func setLogLevel(level string) error {
 	}
 	logrus.SetLevel(logLevel)
 	return nil
+}
+
+type notImplementedApplier struct{}
+
+func (notImplementedApplier) Apply(ctx context.Context, desc ocispec.Descriptor, mount []mount.Mount, opts ...diff.ApplyOpt) (ocispec.Descriptor, error) {
+	return ocispec.Descriptor{}, errdefs.ErrNotImplemented
 }
