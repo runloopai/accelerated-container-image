@@ -1456,6 +1456,14 @@ func (o *snapshotter) Compare(ctx context.Context, lower, upper []mount.Mount, o
 	}
 
 	digest := writer.Digest()
+
+	// Sanity check that the content exists
+	_, err = cs.Info(ctx, digest)
+	if err != nil {
+		logrus.Errorln("failed to get info from content store:", err)
+		return ocispec.Descriptor{}, err
+	}
+
 	desc := ocispec.Descriptor{
 		MediaType: config.MediaType,
 		Digest:    digest,
@@ -1467,6 +1475,7 @@ func (o *snapshotter) Compare(ctx context.Context, lower, upper []mount.Mount, o
 			label.OverlayBDBlobFsType: "ext4",
 		},
 	}
+
 	logrus.Infof("Diff created with spec %+v", desc)
 	return desc, nil
 }
