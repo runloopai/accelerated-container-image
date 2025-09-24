@@ -19,10 +19,15 @@ package snapshot
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,6 +37,8 @@ import (
 	"github.com/containerd/accelerated-container-image/pkg/label"
 	"github.com/containerd/accelerated-container-image/pkg/snapshot/diskquota"
 	"github.com/containerd/accelerated-container-image/pkg/tracing"
+	"github.com/containerd/accelerated-container-image/pkg/utils"
+	"github.com/containerd/accelerated-container-image/pkg/version"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
@@ -40,14 +47,20 @@ import (
 	"github.com/data-accelerator/zdfs"
 	"github.com/sirupsen/logrus"
 
-	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/continuity/fs"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/moby/locker"
 	"github.com/pkg/errors"
+
+	"github.com/containerd/containerd/v2/core/diff"
+	"github.com/containerd/containerd/v2/core/mount"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // storageType is used to indicate that what kind of the snapshot it is.
@@ -215,8 +228,13 @@ type snapshotter struct {
 	quotaSize   string
 }
 
+type SnapshotterAndComparer interface {
+	snapshots.Snapshotter
+	diff.Comparer
+}
+
 // NewSnapshotter returns a Snapshotter which uses block device based on overlayFS.
-func NewSnapshotter(bootConfig *BootConfig, opts ...Opt) (snapshots.Snapshotter, error) {
+func NewSnapshotter(bootConfig *BootConfig, opts ...Opt) (SnapshotterAndComparer, error) {
 	config := defaultConfig
 	for _, opt := range opts {
 		if err := opt(&config); err != nil {
@@ -1198,6 +1216,261 @@ func (o *snapshotter) Remove(ctx context.Context, key string) (err error) {
 	return nil
 }
 
+// Reverses a map, returning a map that maps value to key. This is lossy, in that if
+// multiple keys map to the same value, the returned map will map that value to the
+// last key in iteration order.
+func ReverseMapLossy[K comparable, V comparable](src map[K]V) map[V]K {
+	reversed := make(map[V]K)
+	for k, v := range src {
+		reversed[v] = k
+	}
+	return reversed
+}
+
+type snapshotIdAndInfo struct {
+	snapshots.Info
+	Id string
+}
+
+// Returns a map of block device path (`/dev/XXX`) to snapshot Info.
+func (o *snapshotter) resolveBlockDevices(ctx context.Context) (map[string]*snapshotIdAndInfo, error) {
+	ctx, t, err := o.ms.TransactionContext(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	defer t.Rollback()
+
+	// Build a reverse-lookup map so that we can recover the ID from the snapshot Name
+	ids, err := storage.IDMap(ctx)
+	if err != nil {
+		return nil, err
+	}
+	keyToId := ReverseMapLossy(ids)
+
+	// Construct a lookup map of block device path to info by walking the snapshots
+	results := make(map[string]*snapshotIdAndInfo)
+	storage.WalkInfo(ctx, func(ctx context.Context, info snapshots.Info) error {
+		id, ok := keyToId[info.Name]
+		if !ok {
+			return nil
+		}
+		// Read the backstore mark file, which containts the `/dev/XXX` device path.
+		// If the read fails, this is likely not an overlaybd snapshot, so skip it.
+		blockDev, err := os.ReadFile(o.overlaybdBackstoreMarkFile(id))
+		if err != nil {
+			return nil
+		}
+		results[strings.TrimSpace(string(blockDev))] = &snapshotIdAndInfo{
+			Id:   id,
+			Info: info,
+		}
+		return nil
+	})
+	return results, nil
+}
+
+func getBlockDeviceMount(m []mount.Mount, mode string) (string, bool) {
+	if len(m) == 1 && strings.HasPrefix(m[0].Source, "/dev/") && slices.Contains(m[0].Options, mode) {
+		return m[0].Source, true
+	}
+	return "", false
+}
+
+// Validates that the lower and upper mounts are compatible with this Differ and returns the upper mount info if they are.
+func (o *snapshotter) validateDiffCompatibility(ctx context.Context, lower, upper []mount.Mount) (*snapshotIdAndInfo, bool) {
+	// Only handle requests whose upper mount is a RW block device.
+	upperDev, ok := getBlockDeviceMount(upper, "rw")
+	if !ok {
+		return nil, false
+	}
+
+	// Only handle requests whose lower mount is a RO block device.
+	lowerDev, ok := getBlockDeviceMount(lower, "ro")
+	if !ok {
+		return nil, false
+	}
+
+	// Create a block device path to info lookup map.
+	lookup, err := o.resolveBlockDevices(ctx)
+	if err != nil {
+		logrus.Errorln("failed to create block device lookup map:", err)
+		return nil, false
+	}
+
+	// Validate the upper device properties.
+	upperInfo, ok := lookup[upperDev]
+	if !ok {
+		logrus.Warnf("upper dev %q is not managed by overlaybd", upperDev)
+		return nil, false
+	}
+	if upperInfo.Kind != snapshots.KindActive {
+		logrus.Warnf("upper snapshot %s must be active", upperInfo.Name)
+		return nil, false
+	}
+
+	// Validate the lower device properties.
+	lowerInfo, ok := lookup[lowerDev]
+	if !ok {
+		logrus.Warnf("lower dev %q is not managed by overlaybd", lowerDev)
+		return nil, false
+	}
+	switch lowerInfo.Kind {
+	case snapshots.KindCommitted:
+		if lowerInfo.Name != upperInfo.Parent {
+			logrus.Warnf("upper snapshot %s must be direct child of lower snapshot %s", upperInfo.Name, lowerInfo.Name)
+			return nil, false
+		}
+	case snapshots.KindView:
+		// A View is a RO snapshot on top of a committed snapshot, so we compare parents to determine ancestry.
+		if lowerInfo.Parent != upperInfo.Parent {
+			logrus.Warnf("upper snapshot %s must be direct child of lower snapshot %s", upperInfo.Name, lowerInfo.Name)
+			return nil, false
+		}
+	default:
+		logrus.Warnf("lower snapshot %s must be a RO layer", lowerInfo.Name)
+		return nil, false
+	}
+
+	return upperInfo, true
+}
+
+const uncompressedOciLayerMediaType = "application/vnd.oci.image.layer.v1.tar"
+
+func (o *snapshotter) Compare(ctx context.Context, lower, upper []mount.Mount, opts ...diff.Opt) (ocispec.Descriptor, error) {
+	// Inflate our config from the passed in options.
+	var config diff.Config
+	for _, opt := range opts {
+		if err := opt(&config); err != nil {
+			return ocispec.Descriptor{}, err
+		}
+	}
+
+	logrus.Infoln("Compare")
+	logrus.Infof("-> lower  is %+v", lower)
+	logrus.Infof("-> upper  is %+v", upper)
+	logrus.Infof("-> config is %+v", config)
+
+	// MediaType must be uncompressed OCI.
+	if config.MediaType == "" {
+		config.MediaType = uncompressedOciLayerMediaType
+	} else if config.MediaType != uncompressedOciLayerMediaType {
+		return ocispec.Descriptor{}, errdefs.ErrNotImplemented
+	}
+
+	// If we are not given a reference ID, make our own.
+	newReference := false
+	if config.Reference == "" {
+		config.Reference = uniqueRef()
+		newReference = true
+	}
+
+	// Make sure we can handle this Diff, as we only want to handle the case where
+	// the Diff is between an overlaybd writable layer and its parent.
+	upperInfo, compatible := o.validateDiffCompatibility(ctx, lower, upper)
+	if !compatible {
+		// ErrNotImplemented instructs containerd to try the next Differ.
+		return ocispec.Descriptor{}, errdefs.ErrNotImplemented
+	}
+
+	// Create a temp directory to store the results of overlaybd-commit.
+	tempDir, err := os.MkdirTemp("", fmt.Sprintf("%s-*", upperInfo.Id))
+	if err != nil {
+		logrus.Errorln("failed to create tmpdir:", err)
+		return ocispec.Descriptor{}, err
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Call overlaybd-commit to create the overlaybd.commit file. Use zfile compression
+	// and wrap it in a TAR file for compatibility.
+	blockPath := o.blockPath(upperInfo.Id)
+	err = utils.Commit(ctx, blockPath, tempDir, false, "-z", "-t")
+	if err != nil {
+		logrus.Errorf("failed to commit %q for snapshot %s: %v", blockPath, upperInfo.Name, err)
+		return ocispec.Descriptor{}, err
+	}
+
+	overlaybdCommitFile := path.Join(tempDir, "overlaybd.commit")
+	logrus.Infof("overlaybd-commit of snapshot %s succeeded: %s", upperInfo.Name, overlaybdCommitFile)
+
+	// Write the commit file into containerd's content store.
+
+	containerdClient, err := client.New("/run/containerd/containerd.sock")
+	if err != nil {
+		logrus.Errorln("failed to create client to containerd:", err)
+		return ocispec.Descriptor{}, err
+	}
+	defer containerdClient.Close()
+
+	cs := containerdClient.ContentStore()
+
+	// HACK: Hardcode the namespace, for some reason it is not propagated into our DiffService.
+	ctx = namespaces.WithNamespace(ctx, "k8s.io")
+
+	// Grab a new content store writer using a unique ref to ensure it is new.
+	writer, err := cs.Writer(ctx, content.WithRef(config.Reference), content.WithDescriptor(ocispec.Descriptor{MediaType: config.MediaType}))
+	if err != nil {
+		logrus.Errorln("failed to get content store writer:", err)
+		return ocispec.Descriptor{}, err
+	}
+	var errWrite error
+	defer func() {
+		writer.Close()
+		// Only abort on an error and if we owned this reference.
+		if errWrite != nil && newReference {
+			if errAbort := cs.Abort(ctx, config.Reference); errAbort != nil {
+				logrus.Errorf("failed to abort content store write %q: %v", config.Reference, errAbort)
+			}
+		}
+	}()
+
+	if !newReference {
+		// If we are given a reference, make sure we rewind to the beginning.
+		if errWrite = writer.Truncate(0); errWrite != nil {
+			logrus.Errorf("failed to truncate existing writer with ref %s: %v", config.Reference, errWrite)
+			return ocispec.Descriptor{}, errWrite
+		}
+	}
+
+	// Write the commit file into the content store.
+	src, errWrite := os.Open(overlaybdCommitFile)
+	if errWrite != nil {
+		logrus.Errorf("failed to open %q: %v", overlaybdCommitFile, errWrite)
+		return ocispec.Descriptor{}, errWrite
+	}
+	defer src.Close()
+	size, errWrite := io.Copy(writer, src)
+	if errWrite != nil {
+		logrus.Errorln("failed to write overlaybd commit file to content store:", errWrite)
+		return ocispec.Descriptor{}, errWrite
+	}
+	var commitopts []content.Opt
+	if config.Labels != nil {
+		commitopts = append(commitopts, content.WithLabels(config.Labels))
+	}
+	if errWrite = writer.Commit(ctx, size, "", commitopts...); errWrite != nil {
+		if !errdefs.IsAlreadyExists(errWrite) {
+			logrus.Errorln("failed to commit overlaybd layer to content store:", errWrite)
+			return ocispec.Descriptor{}, errWrite
+		}
+		errWrite = nil
+	}
+
+	digest := writer.Digest()
+	desc := ocispec.Descriptor{
+		MediaType: config.MediaType,
+		Digest:    digest,
+		Size:      size,
+		Annotations: map[string]string{
+			label.OverlayBDVersion:    version.OverlayBDVersionNumber,
+			label.OverlayBDBlobDigest: digest.String(),
+			label.OverlayBDBlobSize:   fmt.Sprintf("%d", size),
+			label.OverlayBDBlobFsType: "ext4",
+		},
+	}
+	logrus.Infof("Diff created with spec %+v", desc)
+	return desc, nil
+}
+
 // Walk the snapshots.
 func (o *snapshotter) Walk(ctx context.Context, fn snapshots.WalkFunc, fs ...string) (err error) {
 	log.G(ctx).Infof("Walk (fs: %s)", fs)
@@ -1745,4 +2018,12 @@ func isOverlaybdFileHeader(header []byte) bool {
 	lsmtFormat := magic0 == 564050879402828 && magic1 == 5478704352671792741 && magic2 == 9993152565363659426
 
 	return zfileFormat || lsmtFormat
+}
+
+func uniqueRef() string {
+	t := time.Now()
+	var b [3]byte
+	// Ignore read failures, just decreases uniqueness
+	rand.Read(b[:])
+	return fmt.Sprintf("%d-%s", t.UnixNano(), base64.URLEncoding.EncodeToString(b[:]))
 }
