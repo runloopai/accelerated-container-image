@@ -49,6 +49,7 @@ import (
 
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/leases"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
@@ -1372,6 +1373,27 @@ func (o *snapshotter) Compare(ctx context.Context, lower, upper []mount.Mount, o
 		return ocispec.Descriptor{}, errdefs.ErrNotImplemented
 	}
 
+	// NOTE: containerd does not forward the namespace used by nerdctl over GRPC, so we must
+	// set it here (hardcoded).
+	ctx = namespaces.WithNamespace(ctx, "k8s.io")
+
+	containerdClient, err := client.New("/run/containerd/containerd.sock")
+	if err != nil {
+		logrus.Errorln("failed to create client to containerd:", err)
+		return ocispec.Descriptor{}, err
+	}
+	defer containerdClient.Close()
+
+	// NOTE: containerd does not forward the lease used by nerdctl over GRPC, so we must
+	// make our own lease here.
+	ls := containerdClient.LeasesService()
+	lease, err := ls.Create(ctx, leases.WithRandomID(), leases.WithExpiration(1*time.Hour))
+	if err != nil {
+		logrus.Errorln("failed to acquire lease from containerd:", err)
+		return ocispec.Descriptor{}, err
+	}
+	ctx = leases.WithLease(ctx, lease.ID)
+
 	// Create a temp directory to store the results of overlaybd-commit.
 	tempDir, err := os.MkdirTemp("", fmt.Sprintf("%s-*", upperInfo.Id))
 	if err != nil {
@@ -1394,17 +1416,7 @@ func (o *snapshotter) Compare(ctx context.Context, lower, upper []mount.Mount, o
 
 	// Write the commit file into containerd's content store.
 
-	containerdClient, err := client.New("/run/containerd/containerd.sock")
-	if err != nil {
-		logrus.Errorln("failed to create client to containerd:", err)
-		return ocispec.Descriptor{}, err
-	}
-	defer containerdClient.Close()
-
 	cs := containerdClient.ContentStore()
-
-	// HACK: Hardcode the namespace, for some reason it is not propagated into our DiffService.
-	ctx = namespaces.WithNamespace(ctx, "k8s.io")
 
 	// Grab a new content store writer using a unique ref to ensure it is new.
 	writer, err := cs.Writer(ctx, content.WithRef(config.Reference), content.WithDescriptor(ocispec.Descriptor{MediaType: config.MediaType}))
