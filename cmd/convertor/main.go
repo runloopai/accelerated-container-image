@@ -150,7 +150,7 @@ Version: ` + commitID,
 				for _, img := range images {
 					// The main index usually has the original tag name (e.g., "latest")
 					// Platform-specific manifests have names like "latest-linux-amd64"
-					if !strings.Contains(img.Name, "-linux-") && !strings.Contains(img.Name, "imported:") {
+					if !strings.Contains(img.Name, "-linux-") && !strings.Contains(img.Name, "local/imported:") {
 						ref = img.Name
 						isMultiArch = (img.Target.MediaType == "application/vnd.oci.image.index.v1+json")
 						break

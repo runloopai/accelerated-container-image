@@ -149,7 +149,7 @@ func NewContentStoreResolverFromTar(ctx context.Context, tarPath string) (*Conte
 			log.G(ctx).Debugf("  📁 FOUND IMAGE INDEX: Importing as-is for multi-arch conversion")
 
 			// Import the index itself - let the builder handle platform traversal
-			ref := fmt.Sprintf("imported:%s", manifest.Digest.Encoded()[:12])
+			ref := fmt.Sprintf("local/imported:%s", manifest.Digest.Encoded()[:12])
 			if manifest.Annotations != nil {
 				if name, ok := manifest.Annotations["org.opencontainers.image.ref.name"]; ok {
 					ref = name
@@ -169,7 +169,7 @@ func NewContentStoreResolverFromTar(ctx context.Context, tarPath string) (*Conte
 		log.G(ctx).Debugf("  ✅ PROCESSING: Regular container manifest")
 
 		// Generate a reference name for the imported image
-		ref := fmt.Sprintf("imported:%s", manifest.Digest.Encoded()[:12])
+		ref := fmt.Sprintf("local/imported:%s", manifest.Digest.Encoded()[:12])
 		if manifest.Annotations != nil {
 			if name, ok := manifest.Annotations["org.opencontainers.image.ref.name"]; ok {
 				ref = name
