@@ -450,7 +450,7 @@ func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string
 				} else {
 					switch fstype {
 					case "ext4":
-						mountOpts = "discard"
+						mountOpts = "discard,data=journal"
 					case "xfs":
 						mountOpts = "nouuid,discard"
 					default:

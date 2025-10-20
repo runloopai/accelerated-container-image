@@ -1579,6 +1579,7 @@ func (o *snapshotter) basedOnBlockDeviceMount(ctx context.Context, s storage.Sna
 				Options: []string{
 					rwflag,
 					"discard",
+					"data=journal",
 				},
 			},
 		}, nil
