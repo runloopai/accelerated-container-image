@@ -966,6 +966,21 @@ func (o *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 
 			opts = append(opts, snapshots.WithLabels(map[string]string{label.LocalOverlayBDPath: o.overlaybdSealedFilePath(id)}))
 		}
+	} else if oinfo.Labels[label.AccelerationLayer] != "yes" {
+		// Fallback: detect writable overlaybd layers without SupportReadWriteMode label.
+		// buildkit OCI worker never sets SupportReadWriteMode, so we detect by checking
+		// whether a backing store config and writable_data file both exist.
+		if _, err := o.loadBackingStoreConfig(id); err == nil {
+			if _, statErr := os.Stat(o.overlaybdWritableDataPath(id)); statErr == nil {
+				if err := o.unmountAndDetachBlockDevice(ctx, id, key); err != nil {
+					return errors.Wrapf(err, "failed to unmount device for snapshot %s", key)
+				}
+				if err := o.sealWritableOverlaybd(ctx, id); err != nil {
+					return err
+				}
+				opts = append(opts, snapshots.WithLabels(map[string]string{label.LocalOverlayBDPath: o.overlaybdSealedFilePath(id)}))
+			}
+		}
 	}
 
 	if isOverlaybd, err := zdfs.PrepareOverlayBDSpec(ctx, key, id, o.snPath(id), oinfo, o.snPath); isOverlaybd {
@@ -988,13 +1003,23 @@ func (o *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 	log.G(ctx).Debugf("Commit info (id: %s, info: %v, stype: %d)", id, info.Labels, stype)
 
 	// For turboOCI, we need to construct OverlayBD spec after unpacking
-	// since there could be multiple fs metadata in a turboOCI layer
+	// since there could be multiple fs metadata in a turboOCI layer.
+	// For normal OCI layers (e.g. ubuntu:22.04 extracted by buildkit OCI worker), tar the upper
+	// directory to feed the existing turboOCI conversion pipeline.
+	ociLayerConverted := false
 	if isTurboOCI, digest, _ := o.checkTurboOCI(info.Labels); isTurboOCI {
 		log.G(ctx).Infof("commit turboOCI.v1 layer: (%s, %s)", id, digest)
 		if err := o.constructOverlayBDSpec(ctx, name, false); err != nil {
 			return errors.Wrapf(err, "failed to construct overlaybd config")
 		}
 		stype = storageTypeNormal
+	} else if stype == storageTypeNormal {
+		if err := o.createLayerTarFromUpper(ctx, id); err != nil {
+			log.G(ctx).Debugf("skipping overlaybd conversion for snapshot %s: %v", id, err)
+		} else {
+			stype = storageTypeLocalLayer
+			ociLayerConverted = true
+		}
 	}
 
 	// Firstly, try to convert an OCIv1 tarball to a turboOCI layer.
@@ -1003,9 +1028,16 @@ func (o *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 		// PERFORMANCE WARNING: Converting local layer to turboOCI format
 		log.G(ctx).Warnf("Converting local blob to turboOCI layer (sn: %s). This is a heavyweight operation that processes the entire layer and may take significant time.", id)
 		if err := o.constructOverlayBDSpec(ctx, name, false); err != nil {
-			return errors.Wrapf(err, "failed to construct overlaybd config")
+			if ociLayerConverted {
+				log.G(ctx).Warnf("Failed to convert OCI layer to overlaybd for sn %s, falling back: %v", id, err)
+				os.Remove(o.overlaybdOCILayerPath(id))
+				stype = storageTypeNormal
+			} else {
+				return errors.Wrapf(err, "failed to construct overlaybd config")
+			}
+		} else {
+			stype = storageTypeLocalBlock
 		}
-		stype = storageTypeLocalBlock
 	}
 
 	if stype == storageTypeLocalBlock {
@@ -1017,7 +1049,11 @@ func (o *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 			info.Labels = make(map[string]string)
 		}
 
-		info.Labels[label.LocalOverlayBDPath] = o.overlaybdSealedFilePath(id)
+		obdPath := o.overlaybdSealedFilePath(id)
+		if _, statErr := os.Stat(obdPath); os.IsNotExist(statErr) {
+			obdPath = o.magicFilePath(id)
+		}
+		info.Labels[label.LocalOverlayBDPath] = obdPath
 		delete(info.Labels, label.SupportReadWriteMode)
 		info, err = storage.UpdateInfo(ctx, info)
 		if err != nil {
@@ -1029,6 +1065,29 @@ func (o *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 
 	rollback = false
 	return t.Commit()
+}
+
+// createLayerTarFromUpper creates a layer.tar from the snapshot's upper (fs/) directory.
+// This enables the existing storageTypeLocalLayer → overlaybd conversion path for snapshots
+// that were prepared and committed as plain overlayfs (e.g. OCI base image layers pulled by
+// the buildkit OCI worker).  Returns an error if the upper dir is empty or the tar fails.
+func (o *snapshotter) createLayerTarFromUpper(ctx context.Context, id string) error {
+	upper := o.upperPath(id)
+	entries, err := os.ReadDir(upper)
+	if err != nil {
+		return fmt.Errorf("cannot read upper dir %s: %w", upper, err)
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("upper dir %s is empty, nothing to convert", upper)
+	}
+	tarPath := o.overlaybdOCILayerPath(id)
+	log.G(ctx).Infof("creating layer.tar from upper directory for overlaybd conversion (sn: %s)", id)
+	cmd := exec.CommandContext(ctx, "tar", "--xattrs", "--xattrs-include=*", "-C", upper, "-cf", tarPath, ".")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		os.Remove(tarPath)
+		return errors.Wrapf(err, "failed to create layer.tar (output: %s)", out)
+	}
+	return nil
 }
 
 func (o *snapshotter) commit(ctx context.Context, name, key string, opts ...snapshots.Opt) (string, snapshots.Info, error) {
