@@ -740,7 +740,7 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 	// Compare() gets an overlayfs mount and falls back to the OCI differ, producing OCI tar
 	// format which overlaybd-tcmu cannot mount in DevboxPods.
 	if !o.isPrepareRootfs(info) && kind == snapshots.KindActive && parent == "" &&
-		info.Labels[label.SnapshotType] == "image" && writeType != RoDir {
+		info.Labels[label.SnapshotType] == "image" && o.rwMode == "dev" {
 		if err := o.constructOverlayBDSpec(ctx, key, true); err != nil {
 			log.G(ctx).Warnf("failed to construct overlaybd spec for base image layer %s, falling back to overlayfs: %v", key, err)
 		} else if err = o.attachAndMountBlockDevice(ctx, id, RwDev, o.defaultFsType, true); err != nil {
