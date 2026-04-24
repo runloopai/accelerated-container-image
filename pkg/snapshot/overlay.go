@@ -732,6 +732,25 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 			// do nothing
 		}
 	}
+
+	// For base image layers (no parent, SnapshotType="image", KindActive): create a writable
+	// overlaybd block device formatted with ext4. This lets the OCI applier mount and populate
+	// it with layer content (e.g. ubuntu:22.04 files), and then Compare() can call
+	// overlaybd-commit to produce an overlaybd layer blob instead of OCI tar. Without this,
+	// Compare() gets an overlayfs mount and falls back to the OCI differ, producing OCI tar
+	// format which overlaybd-tcmu cannot mount in DevboxPods.
+	if !o.isPrepareRootfs(info) && kind == snapshots.KindActive && parent == "" &&
+		info.Labels[label.SnapshotType] == "image" && writeType != RoDir {
+		if err := o.constructOverlayBDSpec(ctx, key, true); err != nil {
+			log.G(ctx).Warnf("failed to construct overlaybd spec for base image layer %s, falling back to overlayfs: %v", key, err)
+		} else if err = o.attachAndMountBlockDevice(ctx, id, RwDev, o.defaultFsType, true); err != nil {
+			log.G(ctx).Warnf("failed to attach overlaybd block device for base image layer %s, falling back to overlayfs: %v", key, err)
+			os.RemoveAll(o.overlaybdTargetPath(id))
+		} else {
+			stype = storageTypeLocalBlock
+		}
+	}
+
 	if _, writableBD := info.Labels[label.SupportReadWriteMode]; stype == storageTypeNormal && writableBD {
 		// if is not overlaybd writable layer, delete label before commit
 		delete(info.Labels, label.SupportReadWriteMode)
@@ -1344,12 +1363,6 @@ func (o *snapshotter) validateDiffCompatibility(ctx context.Context, lower, uppe
 		return nil, false
 	}
 
-	// Only handle requests whose lower mount is a RO block device.
-	lowerDev, ok := getBlockDeviceMount(lower, "ro")
-	if !ok {
-		return nil, false
-	}
-
 	// Create a block device path to info lookup map.
 	lookup, err := o.resolveBlockDevices(ctx)
 	if err != nil {
@@ -1365,6 +1378,22 @@ func (o *snapshotter) validateDiffCompatibility(ctx context.Context, lower, uppe
 	}
 	if upperInfo.Kind != snapshots.KindActive {
 		logrus.Warnf("upper snapshot %s must be active", upperInfo.Name)
+		return nil, false
+	}
+
+	// Handle base image layers: no lower parent (e.g. FROM ubuntu:22.04 with no parent layer).
+	// The upper is a writable block device populated by the OCI applier.
+	if len(lower) == 0 {
+		if upperInfo.Parent != "" {
+			logrus.Warnf("upper snapshot %s has parent %q but lower is empty", upperInfo.Name, upperInfo.Parent)
+			return nil, false
+		}
+		return upperInfo, true
+	}
+
+	// Only handle requests whose lower mount is a RO block device.
+	lowerDev, ok := getBlockDeviceMount(lower, "ro")
+	if !ok {
 		return nil, false
 	}
 
