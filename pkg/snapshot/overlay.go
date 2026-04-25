@@ -733,21 +733,26 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 		}
 	}
 
-	// For base image layers (no parent, SnapshotType="image", KindActive): create a writable
-	// overlaybd block device formatted with ext4. This lets the OCI applier mount and populate
-	// it with layer content (e.g. ubuntu:22.04 files), and then Compare() can call
-	// overlaybd-commit to produce an overlaybd layer blob instead of OCI tar. Without this,
-	// Compare() gets an overlayfs mount and falls back to the OCI differ, producing OCI tar
-	// format which overlaybd-tcmu cannot mount in DevboxPods.
-	if !o.isPrepareRootfs(info) && kind == snapshots.KindActive && parent == "" &&
-		info.Labels[label.SnapshotType] == "image" {
+	// For base image layers (no parent, KindActive, stype still Normal after isPrepareRootfs
+	// block): create a writable overlaybd block device formatted with ext4. This lets the OCI
+	// applier mount and populate it with layer content (e.g. ubuntu:22.04 files), and then
+	// Compare() can call overlaybd-commit to produce an overlaybd layer blob instead of OCI tar.
+	// Without this, Compare() gets an overlayfs bind mount and falls back to the OCI differ,
+	// producing OCI tar+gzip which overlaybd-tcmu cannot mount in DevboxPods.
+	log.G(ctx).Infof("base-layer-block: check (kind=%v, parent=%q, stype=%v) => enter=%v",
+		kind, parent, stype, kind == snapshots.KindActive && parent == "" && stype == storageTypeNormal)
+	if kind == snapshots.KindActive && parent == "" && stype == storageTypeNormal {
+		log.G(ctx).Infof("base-layer-block: attempting overlaybd block device for parentless active snapshot (key=%s, id=%s, isPrepareRootfs=%v, labels=%v)",
+			key, id, o.isPrepareRootfs(info), info.Labels)
 		if err := o.constructOverlayBDSpec(ctx, key, true); err != nil {
-			log.G(ctx).Warnf("failed to construct overlaybd spec for base image layer %s, falling back to overlayfs: %v", key, err)
+			log.G(ctx).Warnf("base-layer-block: constructOverlayBDSpec failed for %s, falling back to overlayfs: %v", key, err)
 		} else if err = o.attachAndMountBlockDevice(ctx, id, RwDev, o.defaultFsType, true); err != nil {
-			log.G(ctx).Warnf("failed to attach overlaybd block device for base image layer %s, falling back to overlayfs: %v", key, err)
+			log.G(ctx).Warnf("base-layer-block: attachAndMountBlockDevice failed for %s, falling back to overlayfs: %v", key, err)
 			os.RemoveAll(o.overlaybdTargetPath(id))
 		} else {
+			log.G(ctx).Infof("base-layer-block: success, snapshot %s (id=%s) will use RwDev block device", key, id)
 			stype = storageTypeLocalBlock
+			writeType = RwDev
 		}
 	}
 
