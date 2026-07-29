@@ -67,6 +67,10 @@ var (
 	outputDir     string
 	tarExportRepo string
 
+	// direct upload
+	directUpload bool
+	registryURL  string
+
 	// certification
 	certDirs    []string
 	rootCAs     []string
@@ -105,6 +109,18 @@ Version: ` + commitID,
 			}
 			if outputDir != "" && exportTar != "" {
 				logrus.Error("--output-dir and --export-tar are mutually exclusive")
+				os.Exit(1)
+			}
+			if directUpload && importTar == "" {
+				logrus.Error("--direct-upload requires --import-tar")
+				os.Exit(1)
+			}
+			if directUpload && (exportTar != "" || outputDir != "") {
+				logrus.Error("--direct-upload is mutually exclusive with --export-tar and --output-dir")
+				os.Exit(1)
+			}
+			if directUpload && repo == "" {
+				logrus.Error("--direct-upload requires -r/--repository")
 				os.Exit(1)
 			}
 			if importTar == "" && repo == "" {
@@ -184,16 +200,20 @@ Version: ` + commitID,
 
 				// Choose resolver based on export mode
 				var customResolver remotes.Resolver
-				if exportTar != "" || outputDir != "" {
-					// For tar export or dir export, use FileBasedResolver to capture converted layers locally.
-					logrus.Debugf("local export mode: using file-based resolver to capture converted layers")
+				if exportTar != "" || outputDir != "" || directUpload {
+					// For local export or direct upload, use FileBasedResolver to capture converted layers locally.
+					logrus.Debugf("local capture mode: using file-based resolver to capture converted layers")
 					var err error
 					exportResolver, err = builder.NewFileBasedResolver(importResolver.Store(), importResolver.ImageStore())
 					if err != nil {
 						logrus.Errorf("failed to create file-based resolver: %v", err)
 						os.Exit(1)
 					}
-					repo = tarExportRepo
+					if !directUpload {
+						// For tar/dir export, override repo to a synthetic local value so the builder
+						// does not attempt a real registry push.
+						repo = tarExportRepo
+					}
 					customResolver = exportResolver
 
 					// Setup cleanup for export resolver temporary directory.
@@ -367,6 +387,29 @@ Version: ` + commitID,
 					}
 					logrus.Info("dir export finished")
 				}
+				// Handle direct upload if requested
+				if directUpload && exportResolver != nil {
+					imageRef := repo + ":" + overlaybd
+					logrus.Debugf("uploading converted overlaybd artifacts directly to discoball: %s", imageRef)
+					regURL := registryURL
+					if regURL == "" {
+						// Derive from the registry portion of repo (first path segment).
+						registry := strings.SplitN(repo, "/", 2)[0]
+						regURL = "https://" + registry
+					}
+					manifestDigest, err := builder.DirectUploadFromStore(
+						ctx,
+						exportResolver.OutputStore(),
+						exportResolver.OutputImageStore(),
+						imageRef,
+						regURL,
+					)
+					if err != nil {
+						logrus.Errorf("direct upload failed: %v", err)
+						os.Exit(1)
+					}
+					logrus.Infof("direct upload complete: manifest_digest=%s", manifestDigest)
+				}
 			}
 			if tb != "" {
 				logrus.Info("building [Overlaybd - Turbo OCIv1] image...")
@@ -421,6 +464,10 @@ func init() {
 	rootCmd.Flags().StringVar(&exportTar, "export-tar", "", "export converted image to tar file (OCI layout format)")
 	rootCmd.Flags().StringVar(&outputDir, "output-dir", "", "export converted artifacts to a local directory (requires --import-tar; mutually exclusive with --export-tar)")
 	rootCmd.Flags().StringVar(&tarExportRepo, "tar-export-repo", "localhost/converted", "repository name used in exported tar file (only used with --export-tar)")
+
+	// direct upload
+	rootCmd.Flags().BoolVar(&directUpload, "direct-upload", false, "upload converted artifacts directly to discoball (requires --import-tar and -r/--repository)")
+	rootCmd.Flags().StringVar(&registryURL, "registry-url", "", "registry base URL for direct upload (e.g. https://disco.runloop.pro); defaults to https://{registry from -r}")
 
 	// certification
 	rootCmd.Flags().StringArrayVar(&certDirs, "cert-dir", nil, "In these directories, root CA should be named as *.crt and client cert should be named as *.cert, *.key")
