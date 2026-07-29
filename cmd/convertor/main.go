@@ -64,6 +64,7 @@ var (
 	// tar import/export
 	importTar     string
 	exportTar     string
+	outputDir     string
 	tarExportRepo string
 
 	// certification
@@ -96,6 +97,14 @@ Version: ` + commitID,
 			}
 			if importTar != "" && (digestInput != "" || tagInput != "") {
 				logrus.Error("import-tar cannot be used with input-tag or input-digest")
+				os.Exit(1)
+			}
+			if outputDir != "" && importTar == "" {
+				logrus.Error("--output-dir requires --import-tar")
+				os.Exit(1)
+			}
+			if outputDir != "" && exportTar != "" {
+				logrus.Error("--output-dir and --export-tar are mutually exclusive")
 				os.Exit(1)
 			}
 			if importTar == "" && repo == "" {
@@ -175,9 +184,9 @@ Version: ` + commitID,
 
 				// Choose resolver based on export mode
 				var customResolver remotes.Resolver
-				if exportTar != "" {
-					// For tar export, use FileBasedResolver to capture converted layers locally
-					logrus.Debugf("tar export mode: using file-based resolver to capture converted layers")
+				if exportTar != "" || outputDir != "" {
+					// For tar export or dir export, use FileBasedResolver to capture converted layers locally.
+					logrus.Debugf("local export mode: using file-based resolver to capture converted layers")
 					var err error
 					exportResolver, err = builder.NewFileBasedResolver(importResolver.Store(), importResolver.ImageStore())
 					if err != nil {
@@ -187,7 +196,7 @@ Version: ` + commitID,
 					repo = tarExportRepo
 					customResolver = exportResolver
 
-					// Setup cleanup for export resolver temporary directory
+					// Setup cleanup for export resolver temporary directory.
 					defer func() {
 						if !reserve && exportResolver != nil {
 							if err := exportResolver.CleanupTempDir(); err != nil {
@@ -349,6 +358,15 @@ Version: ` + commitID,
 					}
 					logrus.Info("tar export finished")
 				}
+				// Handle dir export if requested
+				if outputDir != "" && exportResolver != nil {
+					logrus.Debugf("exporting converted overlaybd artifacts to directory: %s", outputDir)
+					if err := builder.ExportContentStoreToDir(ctx, exportResolver.OutputStore(), exportResolver.OutputImageStore(), outputDir); err != nil {
+						logrus.Errorf("failed to export to directory: %v", err)
+						os.Exit(1)
+					}
+					logrus.Info("dir export finished")
+				}
 			}
 			if tb != "" {
 				logrus.Info("building [Overlaybd - Turbo OCIv1] image...")
@@ -401,6 +419,7 @@ func init() {
 	// tar import/export
 	rootCmd.Flags().StringVar(&importTar, "import-tar", "", "import image from tar file (OCI layout format)")
 	rootCmd.Flags().StringVar(&exportTar, "export-tar", "", "export converted image to tar file (OCI layout format)")
+	rootCmd.Flags().StringVar(&outputDir, "output-dir", "", "export converted artifacts to a local directory (requires --import-tar; mutually exclusive with --export-tar)")
 	rootCmd.Flags().StringVar(&tarExportRepo, "tar-export-repo", "localhost/converted", "repository name used in exported tar file (only used with --export-tar)")
 
 	// certification
