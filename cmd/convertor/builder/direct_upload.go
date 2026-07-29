@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
@@ -383,6 +384,12 @@ func putPart(client *http.Client, presignedURL string, buf []byte) (string, erro
 	const maxRetries = 3
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(100<<(attempt-1)) * time.Millisecond // 100ms, 200ms, 400ms
+			logrus.Warnf("retrying S3 part upload (attempt=%d delay=%s): %v", attempt, delay, lastErr)
+			time.Sleep(delay)
+		}
+
 		req, err := http.NewRequest(http.MethodPut, presignedURL, bytes.NewReader(buf))
 		if err != nil {
 			return "", err
