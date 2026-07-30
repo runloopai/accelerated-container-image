@@ -367,12 +367,25 @@ func uploadPartsFromStore(
 	sort.Slice(completed, func(i, j int) bool { return completed[i].Number < completed[j].Number })
 
 	// Compute CRC64/NVME by reading the full blob sequentially.
-	crcHash := crc64.New(crc64NVMETable)
-	if _, err := io.Copy(crcHash, io.NewSectionReader(ra, 0, totalSize)); err != nil {
-		return nil, nil, fmt.Errorf("computing CRC64/NVME: %w", err)
+	// CRC-64/NVME: init=0xFFFFFFFFFFFFFFFF, xorout=0xFFFFFFFFFFFFFFFF.
+	var crcRunning uint64 = 0xFFFFFFFFFFFFFFFF
+	chunk := make([]byte, 64*1024)
+	sr := io.NewSectionReader(ra, 0, totalSize)
+	for {
+		n, readErr := sr.Read(chunk)
+		if n > 0 {
+			crcRunning = crc64.Update(crcRunning, crc64NVMETable, chunk[:n])
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return nil, nil, fmt.Errorf("computing CRC64/NVME: %w", readErr)
+		}
 	}
+	crcRunning ^= 0xFFFFFFFFFFFFFFFF
 	var crcBuf [8]byte
-	binary.BigEndian.PutUint64(crcBuf[:], crcHash.Sum64())
+	binary.BigEndian.PutUint64(crcBuf[:], crcRunning)
 	crcStr := base64.StdEncoding.EncodeToString(crcBuf[:])
 
 	return completed, &crcStr, nil
@@ -433,7 +446,8 @@ func countMissing(blobs []blobUploadInstruction) int {
 }
 
 func computeCRC64NVME(data []byte) string {
-	crcVal := crc64.Checksum(data, crc64NVMETable)
+	// CRC-64/NVME: init=0xFFFFFFFFFFFFFFFF, xorout=0xFFFFFFFFFFFFFFFF.
+	crcVal := crc64.Update(0xFFFFFFFFFFFFFFFF, crc64NVMETable, data) ^ 0xFFFFFFFFFFFFFFFF
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], crcVal)
 	return base64.StdEncoding.EncodeToString(buf[:])
