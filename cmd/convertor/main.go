@@ -114,6 +114,10 @@ Version: ` + commitID,
 				logrus.Error("--direct-upload requires -r/--repository")
 				os.Exit(1)
 			}
+			if directUpload && !oci {
+				logrus.Error("--direct-upload requires --oci")
+				os.Exit(1)
+			}
 			if importTar == "" && repo == "" {
 				logrus.Error("repository is required when not using import-tar")
 				os.Exit(1)
