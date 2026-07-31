@@ -28,10 +28,11 @@ const (
 	partUploadConcurrency   = 4
 )
 
-// CRC-64/NVME table. Go's MakeTable expects the reflected (bit-reversed)
-// polynomial. The normal polynomial from the NVMe spec is 0xAD93D23594C935A9;
-// its 64-bit reflection is 0x95AC9329AC4BC9B5.
-var crc64NVMETable = crc64.MakeTable(0x95AC9329AC4BC9B5)
+// CRC-64/NVME table. Go's crc64 package requires the polynomial in reflected
+// form and applies init=0xFFFFFFFFFFFFFFFF / xorout=0xFFFFFFFFFFFFFFFF
+// internally (matching the NVMe spec). The correct reflected polynomial is
+// 0x9A6C9329AC4BC9B5.
+var crc64NVMETable = crc64.MakeTable(0x9A6C9329AC4BC9B5)
 
 // ---- wire types (mirror discoball/registry/handlers/directupload.go) --------
 
@@ -369,25 +370,12 @@ func uploadPartsFromStore(
 	sort.Slice(completed, func(i, j int) bool { return completed[i].Number < completed[j].Number })
 
 	// Compute CRC64/NVME by reading the full blob sequentially.
-	// CRC-64/NVME: init=0xFFFFFFFFFFFFFFFF, xorout=0xFFFFFFFFFFFFFFFF.
-	var crcRunning uint64 = 0xFFFFFFFFFFFFFFFF
-	chunk := make([]byte, 64*1024)
-	sr := io.NewSectionReader(ra, 0, totalSize)
-	for {
-		n, readErr := sr.Read(chunk)
-		if n > 0 {
-			crcRunning = crc64.Update(crcRunning, crc64NVMETable, chunk[:n])
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return nil, nil, fmt.Errorf("computing CRC64/NVME: %w", readErr)
-		}
+	crcHash := crc64.New(crc64NVMETable)
+	if _, err := io.Copy(crcHash, io.NewSectionReader(ra, 0, totalSize)); err != nil {
+		return nil, nil, fmt.Errorf("computing CRC64/NVME: %w", err)
 	}
-	crcRunning ^= 0xFFFFFFFFFFFFFFFF
 	var crcBuf [8]byte
-	binary.BigEndian.PutUint64(crcBuf[:], crcRunning)
+	binary.BigEndian.PutUint64(crcBuf[:], crcHash.Sum64())
 	crcStr := base64.StdEncoding.EncodeToString(crcBuf[:])
 
 	return completed, &crcStr, nil
@@ -448,8 +436,7 @@ func countMissing(blobs []blobUploadInstruction) int {
 }
 
 func computeCRC64NVME(data []byte) string {
-	// CRC-64/NVME: init=0xFFFFFFFFFFFFFFFF, xorout=0xFFFFFFFFFFFFFFFF.
-	crcVal := crc64.Update(0xFFFFFFFFFFFFFFFF, crc64NVMETable, data) ^ 0xFFFFFFFFFFFFFFFF
+	crcVal := crc64.Checksum(data, crc64NVMETable)
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], crcVal)
 	return base64.StdEncoding.EncodeToString(buf[:])
