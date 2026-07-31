@@ -28,10 +28,15 @@ const (
 	partUploadConcurrency   = 4
 )
 
-// CRC-64/NVME table. Go's crc64 package requires the polynomial in reflected
-// form and applies init=0xFFFFFFFFFFFFFFFF / xorout=0xFFFFFFFFFFFFFFFF
-// internally (matching the NVMe spec). The correct reflected polynomial is
-// 0x9A6C9329AC4BC9B5.
+// CRC-64/NVME lookup table. Go's crc64.MakeTable takes the polynomial in
+// reflected form. Go also applies init=0xFFFFFFFFFFFFFFFF and
+// xorout=0xFFFFFFFFFFFFFFFF internally (same as the NVMe spec), so
+// crc64.New / crc64.Checksum are correct as-is without manual init/xorout.
+//
+// The polynomial 0x9A6C9329AC4BC9B5 was verified against the CRC RevEng
+// catalog check value: crc64.Checksum([]byte("123456789"), table) ==
+// 0xAE8B14860A799888, and produces the same output as the Rust
+// crc64fast_nvme crate used on the server side.
 var crc64NVMETable = crc64.MakeTable(0x9A6C9329AC4BC9B5)
 
 // ---- wire types (mirror discoball/registry/handlers/directupload.go) --------
