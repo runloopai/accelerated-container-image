@@ -28,8 +28,10 @@ const (
 	partUploadConcurrency   = 4
 )
 
-// CRC64/NVME table (Jones polynomial, reflected form).
-var crc64NVMETable = crc64.MakeTable(0xAD93D23594C935A9)
+// CRC-64/NVME table. Go's MakeTable expects the reflected (bit-reversed)
+// polynomial. The normal polynomial from the NVMe spec is 0xAD93D23594C935A9;
+// its 64-bit reflection is 0x95AC9329AC4BC9B5.
+var crc64NVMETable = crc64.MakeTable(0x95AC9329AC4BC9B5)
 
 // ---- wire types (mirror discoball/registry/handlers/directupload.go) --------
 
