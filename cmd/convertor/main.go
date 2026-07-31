@@ -64,6 +64,7 @@ var (
 	// tar import/export
 	importTar     string
 	exportTar     string
+	tarExportRepo string
 
 	// direct upload
 	directUpload bool
@@ -202,7 +203,7 @@ Version: ` + commitID,
 					if exportTar != "" {
 						// For tar export, override repo to a synthetic local value so the builder
 						// does not attempt a real registry push.
-						repo = "localhost/converted"
+						repo = tarExportRepo
 					}
 					customResolver = exportResolver
 
@@ -443,6 +444,7 @@ func init() {
 	// tar import/export
 	rootCmd.Flags().StringVar(&importTar, "import-tar", "", "import image from tar file (OCI layout format)")
 	rootCmd.Flags().StringVar(&exportTar, "export-tar", "", "export converted image to tar file (OCI layout format)")
+	rootCmd.Flags().StringVar(&tarExportRepo, "tar-export-repo", "localhost/converted", "repository name used in exported tar file (only used with --export-tar)")
 
 	// direct upload
 	rootCmd.Flags().BoolVar(&directUpload, "direct-upload", false, "upload converted artifacts directly to discoball (requires --import-tar and -r/--repository)")
