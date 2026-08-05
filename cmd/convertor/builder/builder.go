@@ -81,6 +81,11 @@ type BuilderOptions struct {
 	// CustomResolver allows using a custom resolver instead of the default docker resolver
 	// Used for tar import/export functionality
 	CustomResolver remotes.Resolver
+
+	// Pipeline, when set, uploads each converted layer blob to S3 immediately
+	// after it finishes converting, overlapping upload time with conversion of
+	// subsequent layers.
+	Pipeline *DirectUploadPipeline
 }
 
 type graphBuilder struct {
@@ -300,6 +305,7 @@ func (b *graphBuilder) buildOne(ctx context.Context, src v1.Descriptor, tag bool
 	engineBase.noUpload = b.NoUpload
 	engineBase.dumpManifest = b.DumpManifest
 	engineBase.retryCount = b.RetryCount
+	engineBase.pipeline = b.Pipeline
 	if _, ok := b.Resolver.(*FileBasedResolver); ok {
 		engineBase.tarExport = true
 	}

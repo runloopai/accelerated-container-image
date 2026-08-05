@@ -358,6 +358,27 @@ Version: ` + commitID,
 					logrus.Debugf("falling back to no deduplication")
 				}
 
+				// Set up pipelined direct upload: each layer is uploaded to S3
+				// immediately after it finishes converting, overlapping upload
+				// with conversion of subsequent layers.
+				if directUpload && exportResolver != nil {
+					imageRef := repo + ":" + overlaybd
+					regURL := registryURL
+					if regURL == "" {
+						regURL = "https://" + strings.SplitN(repo, "/", 2)[0]
+					}
+					pipeline, err := builder.NewDirectUploadPipeline(
+						exportResolver.OutputStore(),
+						imageRef,
+						regURL,
+					)
+					if err != nil {
+						logrus.Errorf("failed to create direct upload pipeline: %v", err)
+						os.Exit(1)
+					}
+					opt.Pipeline = pipeline
+				}
+
 				if err := builder.Build(ctx, opt); err != nil {
 					logrus.Errorf("failed to build overlaybd: %v", err)
 					os.Exit(1)
@@ -373,22 +394,24 @@ Version: ` + commitID,
 					}
 					logrus.Info("tar export finished")
 				}
-								// Handle direct upload if requested
+
+				// Handle direct upload: remaining blobs (config, base layer)
+				// are uploaded here; layer blobs were already uploaded by the
+				// pipeline during Build.
 				if directUpload && exportResolver != nil {
 					imageRef := repo + ":" + overlaybd
 					logrus.Debugf("uploading converted overlaybd artifacts directly to discoball: %s", imageRef)
 					regURL := registryURL
 					if regURL == "" {
-						// Derive from the registry portion of repo (first path segment).
-						registry := strings.SplitN(repo, "/", 2)[0]
-						regURL = "https://" + registry
+						regURL = "https://" + strings.SplitN(repo, "/", 2)[0]
 					}
-					manifestDigest, err := builder.DirectUploadFromStore(
+					manifestDigest, err := builder.DirectUploadWithPipeline(
 						ctx,
 						exportResolver.OutputStore(),
 						exportResolver.OutputImageStore(),
 						imageRef,
 						regURL,
+						opt.Pipeline,
 					)
 					if err != nil {
 						logrus.Errorf("direct upload failed: %v", err)

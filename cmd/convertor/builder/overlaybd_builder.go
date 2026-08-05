@@ -197,6 +197,11 @@ func (e *overlaybdBuilderEngine) UploadLayer(ctx context.Context, idx int) error
 		}
 	}
 	e.overlaybdLayers[idx].desc = desc
+	if e.pipeline != nil {
+		if err := e.pipeline.UploadBlob(ctx, desc); err != nil {
+			return fmt.Errorf("pipeline upload layer %d: %w", idx, err)
+		}
+	}
 	return nil
 }
 

@@ -42,10 +42,17 @@ var crc64NVMETable = crc64.MakeTable(0x9A6C9329AC4BC9B5)
 // ---- wire types (mirror discoball/registry/handlers/directupload.go) --------
 
 // prepareDirectUploadRequest is sent to the prepare endpoint.
-// The manifest field is Go []byte, which JSON-encodes as base64.
+// Either (Manifest + MediaType) or Blobs must be set.
 type prepareDirectUploadRequest struct {
-	Manifest  []byte `json:"manifest"`
-	MediaType string `json:"media_type"`
+	Manifest  []byte              `json:"manifest,omitempty"`
+	MediaType string              `json:"media_type,omitempty"`
+	Blobs     []blobDescriptorReq `json:"blobs,omitempty"`
+}
+
+// blobDescriptorReq is a single blob descriptor for the per-blob prepare path.
+type blobDescriptorReq struct {
+	Digest string `json:"digest"`
+	Size   int64  `json:"size"`
 }
 
 type blobUploadInstruction struct {
@@ -216,6 +223,207 @@ func DirectUploadFromStore(
 	return manifestDigest, nil
 }
 
+// ---- DirectUploadPipeline ---------------------------------------------------
+
+// DirectUploadPipeline uploads each converted layer blob to S3 immediately
+// after it finishes converting, overlapping upload time with conversion of
+// subsequent layers. Call UploadBlob from UploadLayer, then pass the pipeline
+// to DirectUploadWithPipeline after Build completes.
+type DirectUploadPipeline struct {
+	client  *http.Client
+	baseURL string
+	store   content.Store
+	mu      sync.Mutex
+	tokens  map[digest.Digest]blobConfirmEntry
+}
+
+// NewDirectUploadPipeline creates a pipeline that uploads blobs to the given
+// discoball endpoint as they finish converting. store must be the output
+// content store that layers are written to during Build.
+func NewDirectUploadPipeline(store content.Store, imageRef, registryURL string) (*DirectUploadPipeline, error) {
+	scheme := "https"
+	if strings.HasPrefix(registryURL, "http://") {
+		scheme = "http"
+	}
+	_, repository, _, err := parseImageRef(imageRef)
+	if err != nil {
+		return nil, fmt.Errorf("invalid image ref %q: %w", imageRef, err)
+	}
+	registry := strings.SplitN(strings.TrimPrefix(strings.TrimPrefix(imageRef, "https://"), "http://"), "/", 2)[0]
+	baseURL := fmt.Sprintf("%s://%s/gitlab/v1/repositories/%s/direct-upload", scheme, registry, repository)
+	return &DirectUploadPipeline{
+		client:  &http.Client{},
+		baseURL: baseURL,
+		store:   store,
+		tokens:  make(map[digest.Digest]blobConfirmEntry),
+	}, nil
+}
+
+// UploadBlob prepares and uploads a single blob immediately. If the blob
+// already exists in the repository it is skipped. Safe to call concurrently.
+func (p *DirectUploadPipeline) UploadBlob(ctx context.Context, desc ocispec.Descriptor) error {
+	instr, err := prepareSingleBlob(ctx, p.client, p.baseURL, desc.Digest, desc.Size)
+	if err != nil {
+		return fmt.Errorf("prepare blob %s: %w", desc.Digest, err)
+	}
+	if instr.Exists {
+		logrus.Debugf("pipeline: blob %s already exists, skipping", desc.Digest)
+		return nil
+	}
+	var partSize int64
+	if instr.PartSize != nil {
+		partSize = *instr.PartSize
+	}
+	completed, crc64nvme, err := uploadPartsFromStore(ctx, p.client, p.store, desc, instr.Parts, partSize)
+	if err != nil {
+		return fmt.Errorf("upload blob %s: %w", desc.Digest, err)
+	}
+	p.mu.Lock()
+	p.tokens[desc.Digest] = blobConfirmEntry{
+		Digest:    desc.Digest.String(),
+		Token:     *instr.Token,
+		Parts:     completed,
+		CRC64NVME: crc64nvme,
+	}
+	p.mu.Unlock()
+	logrus.Debugf("pipeline: uploaded blob %s", desc.Digest)
+	return nil
+}
+
+func (p *DirectUploadPipeline) getToken(dgst digest.Digest) (blobConfirmEntry, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.tokens[dgst]
+	return e, ok
+}
+
+// DirectUploadWithPipeline is like DirectUploadFromStore but reuses tokens
+// collected by pipeline for blobs already uploaded during conversion. Only
+// remaining blobs (config, base layer) are uploaded in this call.
+func DirectUploadWithPipeline(
+	ctx context.Context,
+	store content.Store,
+	imageStore images.Store,
+	imageRef string,
+	registryURL string,
+	pipeline *DirectUploadPipeline,
+) (string, error) {
+	scheme := "https"
+	if strings.HasPrefix(registryURL, "http://") {
+		scheme = "http"
+	}
+
+	registry, repository, tag, err := parseImageRef(imageRef)
+	if err != nil {
+		return "", fmt.Errorf("invalid image ref %q: %w", imageRef, err)
+	}
+	logrus.Debugf("direct-upload: registry=%s repository=%s tag=%s", registry, repository, tag)
+
+	imgs, err := imageStore.List(ctx, "")
+	if err != nil {
+		return "", fmt.Errorf("listing image store: %w", err)
+	}
+	var manifestDesc *ocispec.Descriptor
+	for _, img := range imgs {
+		if img.Target.MediaType == ocispec.MediaTypeImageIndex {
+			continue
+		}
+		manifestDesc = &img.Target
+		break
+	}
+	if manifestDesc == nil {
+		return "", fmt.Errorf("no non-index image found in output store")
+	}
+
+	manifestBytes, err := content.ReadBlob(ctx, store, *manifestDesc)
+	if err != nil {
+		return "", fmt.Errorf("reading manifest: %w", err)
+	}
+
+	var manifest ocispec.Manifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		return "", fmt.Errorf("parsing manifest: %w", err)
+	}
+
+	client := pipeline.client
+	baseURL := fmt.Sprintf("%s://%s/gitlab/v1/repositories/%s/direct-upload", scheme, registry, repository)
+
+	// Phase 1: prepare with full manifest to discover any remaining blobs.
+	prep, err := prepareUpload(ctx, client, baseURL, manifestBytes)
+	if err != nil {
+		return "", fmt.Errorf("prepare_direct_upload failed: %w", err)
+	}
+	logrus.Infof("direct-upload prepare: total=%d missing=%d", len(prep.Blobs), countMissing(prep.Blobs))
+
+	// Phase 2: for each missing blob, use pipeline token if available; else upload now.
+	var confirmBlobs []blobConfirmEntry
+	for _, instruction := range prep.Blobs {
+		if instruction.Exists {
+			continue
+		}
+		instDigest := digest.Digest(instruction.Digest)
+
+		// Reuse token from pipelined upload if this blob was already uploaded.
+		if entry, ok := pipeline.getToken(instDigest); ok {
+			confirmBlobs = append(confirmBlobs, entry)
+			continue
+		}
+
+		token := *instruction.Token
+		parts := instruction.Parts
+		var partSize int64
+		if instruction.PartSize != nil {
+			partSize = *instruction.PartSize
+		}
+
+		var completed []completedPart
+		var crc64nvme *string
+
+		if instDigest == manifest.Config.Digest {
+			configBytes, err := content.ReadBlob(ctx, store, manifest.Config)
+			if err != nil {
+				return "", fmt.Errorf("reading config blob: %w", err)
+			}
+			completed, err = uploadPartsFromBytes(client, configBytes, parts, partSize)
+			if err != nil {
+				return "", fmt.Errorf("uploading config parts: %w", err)
+			}
+			crc := computeCRC64NVME(configBytes)
+			crc64nvme = &crc
+		} else {
+			var layerDesc *ocispec.Descriptor
+			for i := range manifest.Layers {
+				if manifest.Layers[i].Digest == instDigest {
+					layerDesc = &manifest.Layers[i]
+					break
+				}
+			}
+			if layerDesc == nil {
+				return "", fmt.Errorf("discoball requested unknown blob: %s", instruction.Digest)
+			}
+			completed, crc64nvme, err = uploadPartsFromStore(ctx, client, store, *layerDesc, parts, partSize)
+			if err != nil {
+				return "", fmt.Errorf("uploading layer parts (digest=%s): %w", instruction.Digest, err)
+			}
+		}
+
+		confirmBlobs = append(confirmBlobs, blobConfirmEntry{
+			Digest:    instruction.Digest,
+			Token:     token,
+			Parts:     completed,
+			CRC64NVME: crc64nvme,
+		})
+	}
+
+	// Phase 3: confirm.
+	manifestDigest, err := confirmUpload(ctx, client, baseURL, manifestBytes, tag, confirmBlobs)
+	if err != nil {
+		return "", fmt.Errorf("confirm_direct_upload failed: %w", err)
+	}
+	logrus.Infof("direct-upload complete: manifest_digest=%s", manifestDigest)
+	return manifestDigest, nil
+}
+
 // ---- HTTP helpers -----------------------------------------------------------
 
 func prepareUpload(ctx context.Context, client *http.Client, baseURL string, manifestBytes []byte) (*prepareDirectUploadResponse, error) {
@@ -244,6 +452,37 @@ func prepareUpload(ctx context.Context, client *http.Client, baseURL string, man
 		return nil, fmt.Errorf("parsing prepare response: %w", err)
 	}
 	return &parsed, nil
+}
+
+// prepareSingleBlob calls the per-blob prepare endpoint to get a presigned
+// upload session for one blob without needing the full image manifest.
+func prepareSingleBlob(ctx context.Context, client *http.Client, baseURL string, dgst digest.Digest, size int64) (*blobUploadInstruction, error) {
+	reqBody, err := json.Marshal(prepareDirectUploadRequest{
+		Blobs: []blobDescriptorReq{{Digest: dgst.String(), Size: size}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := doPost(ctx, client, baseURL+"/prepare/", reqBody)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading prepare response: %w", err)
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("prepare returned HTTP %d: %s", resp.StatusCode, body)
+	}
+	var parsed prepareDirectUploadResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("parsing prepare response: %w", err)
+	}
+	if len(parsed.Blobs) != 1 {
+		return nil, fmt.Errorf("expected 1 blob in prepare response, got %d", len(parsed.Blobs))
+	}
+	return &parsed.Blobs[0], nil
 }
 
 func confirmUpload(ctx context.Context, client *http.Client, baseURL string, manifestBytes []byte, tag string, blobs []blobConfirmEntry) (string, error) {

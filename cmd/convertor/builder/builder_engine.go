@@ -118,6 +118,7 @@ type builderEngineBase struct {
 	referrer     bool
 	tarExport    bool
 	retryCount   int
+	pipeline     *DirectUploadPipeline
 }
 
 func (e *builderEngineBase) isGzipLayer(ctx context.Context, idx int) (bool, error) {
