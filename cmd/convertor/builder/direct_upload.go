@@ -165,9 +165,9 @@ func (p *DirectUploadPipeline) getToken(dgst digest.Digest) (blobConfirmEntry, b
 	return e, ok
 }
 
-// DirectUploadWithPipeline is like DirectUploadFromStore but reuses tokens
-// collected by pipeline for blobs already uploaded during conversion. Only
-// remaining blobs (config, base layer) are uploaded in this call.
+// DirectUploadWithPipeline completes a pipelined direct upload. Layer blobs
+// were already uploaded to S3 during Build via UploadBlob; this call uploads
+// only the config blob and confirms all blobs with discoball.
 func DirectUploadWithPipeline(
 	ctx context.Context,
 	store content.Store,
@@ -216,74 +216,44 @@ func DirectUploadWithPipeline(
 	client := pipeline.client
 	baseURL := fmt.Sprintf("%s://%s/gitlab/v1/repositories/%s/direct-upload", scheme, registry, repository)
 
-	// Phase 1: prepare with full manifest to discover any remaining blobs.
-	prep, err := prepareUpload(ctx, client, baseURL, manifestBytes)
-	if err != nil {
-		return "", fmt.Errorf("prepare_direct_upload failed: %w", err)
-	}
-	logrus.Infof("direct-upload prepare: total=%d missing=%d", len(prep.Blobs), countMissing(prep.Blobs))
-
-	// Phase 2: for each missing blob, use pipeline token if available; else upload now.
+	// Collect pipeline tokens for layer blobs uploaded during Build.
+	// Layers not in the pipeline were already present in the registry and
+	// don't need a token — discoball's closure check will verify them.
 	var confirmBlobs []blobConfirmEntry
-	for _, instruction := range prep.Blobs {
-		if instruction.Exists {
-			continue
-		}
-		instDigest := digest.Digest(instruction.Digest)
-
-		// Reuse token from pipelined upload if this blob was already uploaded.
-		if entry, ok := pipeline.getToken(instDigest); ok {
+	for _, layer := range manifest.Layers {
+		if entry, ok := pipeline.getToken(layer.Digest); ok {
 			confirmBlobs = append(confirmBlobs, entry)
-			continue
 		}
+	}
 
-		token := *instruction.Token
-		parts := instruction.Parts
+	// Upload only the config blob via per-blob prepare, avoiding the overhead
+	// of opening S3 sessions for all blobs when layers are already uploaded.
+	configInstr, err := prepareSingleBlob(ctx, client, baseURL, manifest.Config.Digest, manifest.Config.Size)
+	if err != nil {
+		return "", fmt.Errorf("prepare config blob: %w", err)
+	}
+	if !configInstr.Exists {
 		var partSize int64
-		if instruction.PartSize != nil {
-			partSize = *instruction.PartSize
+		if configInstr.PartSize != nil {
+			partSize = *configInstr.PartSize
 		}
-
-		var completed []completedPart
-		var crc64nvme *string
-
-		if instDigest == manifest.Config.Digest {
-			configBytes, err := content.ReadBlob(ctx, store, manifest.Config)
-			if err != nil {
-				return "", fmt.Errorf("reading config blob: %w", err)
-			}
-			completed, err = uploadPartsFromBytes(client, configBytes, parts, partSize)
-			if err != nil {
-				return "", fmt.Errorf("uploading config parts: %w", err)
-			}
-			crc := computeCRC64NVME(configBytes)
-			crc64nvme = &crc
-		} else {
-			var layerDesc *ocispec.Descriptor
-			for i := range manifest.Layers {
-				if manifest.Layers[i].Digest == instDigest {
-					layerDesc = &manifest.Layers[i]
-					break
-				}
-			}
-			if layerDesc == nil {
-				return "", fmt.Errorf("discoball requested unknown blob: %s", instruction.Digest)
-			}
-			completed, crc64nvme, err = uploadPartsFromStore(ctx, client, store, *layerDesc, parts, partSize)
-			if err != nil {
-				return "", fmt.Errorf("uploading layer parts (digest=%s): %w", instruction.Digest, err)
-			}
+		configBytes, err := content.ReadBlob(ctx, store, manifest.Config)
+		if err != nil {
+			return "", fmt.Errorf("reading config blob: %w", err)
 		}
-
+		completed, err := uploadPartsFromBytes(client, configBytes, configInstr.Parts, partSize)
+		if err != nil {
+			return "", fmt.Errorf("uploading config parts: %w", err)
+		}
+		crc := computeCRC64NVME(configBytes)
 		confirmBlobs = append(confirmBlobs, blobConfirmEntry{
-			Digest:    instruction.Digest,
-			Token:     token,
+			Digest:    manifest.Config.Digest.String(),
+			Token:     *configInstr.Token,
 			Parts:     completed,
-			CRC64NVME: crc64nvme,
+			CRC64NVME: &crc,
 		})
 	}
 
-	// Phase 3: confirm.
 	manifestDigest, err := confirmUpload(ctx, client, baseURL, manifestBytes, tag, confirmBlobs)
 	if err != nil {
 		return "", fmt.Errorf("confirm_direct_upload failed: %w", err)
@@ -293,34 +263,6 @@ func DirectUploadWithPipeline(
 }
 
 // ---- HTTP helpers -----------------------------------------------------------
-
-func prepareUpload(ctx context.Context, client *http.Client, baseURL string, manifestBytes []byte) (*prepareDirectUploadResponse, error) {
-	reqBody, err := json.Marshal(prepareDirectUploadRequest{
-		Manifest:  manifestBytes,
-		MediaType: ociManifestV1MediaType,
-	})
-	if err != nil {
-		return nil, err
-	}
-	resp, err := doPost(ctx, client, baseURL+"/prepare/", reqBody)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading prepare response: %w", err)
-	}
-	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("prepare returned HTTP %d: %s", resp.StatusCode, body)
-	}
-	var parsed prepareDirectUploadResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("parsing prepare response: %w", err)
-	}
-	return &parsed, nil
-}
 
 // prepareSingleBlob calls the per-blob prepare endpoint to get a presigned
 // upload session for one blob without needing the full image manifest.
@@ -536,16 +478,6 @@ func putPart(client *http.Client, presignedURL string, buf []byte) (string, erro
 }
 
 // ---- Utilities --------------------------------------------------------------
-
-func countMissing(blobs []blobUploadInstruction) int {
-	n := 0
-	for _, b := range blobs {
-		if !b.Exists {
-			n++
-		}
-	}
-	return n
-}
 
 func computeCRC64NVME(data []byte) string {
 	crcVal := crc64.Checksum(data, crc64NVMETable)
