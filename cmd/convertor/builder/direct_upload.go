@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/opencontainers/go-digest"
@@ -150,61 +152,80 @@ func DirectUploadFromStore(
 	}
 	logrus.Infof("direct-upload prepare: total=%d missing=%d", len(prep.Blobs), countMissing(prep.Blobs))
 
-	// Phase 2: upload missing blobs.
-	var confirmBlobs []blobConfirmEntry
-	for _, instruction := range prep.Blobs {
-		if instruction.Exists {
-			continue
+	// Phase 2: upload missing blobs concurrently.
+	// Collect missing blobs first so each goroutine writes to a unique index.
+	type missingEntry struct {
+		instruction blobUploadInstruction
+		idx         int
+	}
+	var missing []missingEntry
+	for i, instruction := range prep.Blobs {
+		if !instruction.Exists {
+			missing = append(missing, missingEntry{instruction: instruction, idx: i})
 		}
-		token := *instruction.Token
-		parts := instruction.Parts
-		var partSize int64
-		if instruction.PartSize != nil {
-			partSize = *instruction.PartSize
-		}
+	}
 
-		// Determine which blob this is.
-		instDigest := digest.Digest(instruction.Digest)
-		var completed []completedPart
-		var crc64nvme *string
+	// A single semaphore shared across all blobs keeps total concurrent PUTs
+	// bounded at partUploadConcurrency regardless of how many blobs are missing.
+	globalSem := make(chan struct{}, partUploadConcurrency)
+	confirmBlobs := make([]blobConfirmEntry, len(missing))
+	g, gctx := errgroup.WithContext(ctx)
+	for i, m := range missing {
+		i, m := i, m
+		g.Go(func() error {
+			token := *m.instruction.Token
+			parts := m.instruction.Parts
+			var partSize int64
+			if m.instruction.PartSize != nil {
+				partSize = *m.instruction.PartSize
+			}
 
-		if instDigest == manifest.Config.Digest {
-			// Config blob: small, load into memory.
-			configDesc := manifest.Config
-			configBytes, err := content.ReadBlob(ctx, store, configDesc)
-			if err != nil {
-				return "", fmt.Errorf("reading config blob: %w", err)
-			}
-			completed, err = uploadPartsFromBytes(client, configBytes, parts, partSize)
-			if err != nil {
-				return "", fmt.Errorf("uploading config parts: %w", err)
-			}
-			crc := computeCRC64NVME(configBytes)
-			crc64nvme = &crc
-		} else {
-			// Layer blob: stream from content store.
-			var layerDesc *ocispec.Descriptor
-			for i := range manifest.Layers {
-				if manifest.Layers[i].Digest == instDigest {
-					layerDesc = &manifest.Layers[i]
-					break
+			instDigest := digest.Digest(m.instruction.Digest)
+			var completed []completedPart
+			var crc64nvme *string
+
+			if instDigest == manifest.Config.Digest {
+				// Config blob: small, upload sequentially outside the global sem.
+				configBytes, err := content.ReadBlob(gctx, store, manifest.Config)
+				if err != nil {
+					return fmt.Errorf("reading config blob: %w", err)
+				}
+				completed, err = uploadPartsFromBytes(client, configBytes, parts, partSize)
+				if err != nil {
+					return fmt.Errorf("uploading config parts: %w", err)
+				}
+				crc := computeCRC64NVME(configBytes)
+				crc64nvme = &crc
+			} else {
+				// Layer blob: stream from content store, parts share the global semaphore.
+				var layerDesc *ocispec.Descriptor
+				for j := range manifest.Layers {
+					if manifest.Layers[j].Digest == instDigest {
+						layerDesc = &manifest.Layers[j]
+						break
+					}
+				}
+				if layerDesc == nil {
+					return fmt.Errorf("discoball requested unknown blob: %s", m.instruction.Digest)
+				}
+				var err error
+				completed, crc64nvme, err = uploadPartsFromStore(gctx, client, store, *layerDesc, parts, partSize, globalSem)
+				if err != nil {
+					return fmt.Errorf("uploading layer parts (digest=%s): %w", m.instruction.Digest, err)
 				}
 			}
-			if layerDesc == nil {
-				return "", fmt.Errorf("discoball requested unknown blob: %s", instruction.Digest)
-			}
-			completed, crc64nvme, err = uploadPartsFromStore(ctx, client, store, *layerDesc, parts, partSize)
-			if err != nil {
-				return "", fmt.Errorf("uploading layer parts (digest=%s): %w", instruction.Digest, err)
-			}
-		}
 
-		confirmBlobs = append(confirmBlobs, blobConfirmEntry{
-			Digest:    instruction.Digest,
-			Token:     token,
-			Parts:     completed,
-			CRC64NVME: crc64nvme,
+			confirmBlobs[i] = blobConfirmEntry{
+				Digest:    m.instruction.Digest,
+				Token:     token,
+				Parts:     completed,
+				CRC64NVME: crc64nvme,
+			}
+			return nil
 		})
+	}
+	if err := g.Wait(); err != nil {
+		return "", err
 	}
 
 	// Phase 3: confirm.
@@ -321,6 +342,7 @@ func uploadPartsFromStore(
 	desc ocispec.Descriptor,
 	parts []uploadPartInfo,
 	partSize int64,
+	sem chan struct{},
 ) ([]completedPart, *string, error) {
 	ra, err := store.ReaderAt(ctx, desc)
 	if err != nil {
@@ -335,7 +357,6 @@ func uploadPartsFromStore(
 	}
 
 	results := make([]result, len(parts))
-	sem := make(chan struct{}, partUploadConcurrency)
 	var wg sync.WaitGroup
 
 	for i, p := range parts {
