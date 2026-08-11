@@ -163,9 +163,19 @@ func DirectUploadFromStore(
 	}
 	var missing []missingEntry
 	for i, instruction := range prep.Blobs {
-		if !instruction.Exists {
-			missing = append(missing, missingEntry{instruction: instruction, idx: i})
+		if instruction.Exists {
+			continue
 		}
+		if instruction.Token == nil {
+			return "", fmt.Errorf("prepare response missing token for blob %s", instruction.Digest)
+		}
+		if len(instruction.Parts) == 0 {
+			return "", fmt.Errorf("prepare response has no parts for blob %s", instruction.Digest)
+		}
+		if instruction.PartSize == nil || *instruction.PartSize <= 0 {
+			return "", fmt.Errorf("prepare response has invalid part_size for blob %s", instruction.Digest)
+		}
+		missing = append(missing, missingEntry{instruction: instruction, idx: i})
 	}
 
 	// A single semaphore shared across all blobs keeps total concurrent PUTs
@@ -178,10 +188,7 @@ func DirectUploadFromStore(
 		g.Go(func() error {
 			token := *m.instruction.Token
 			parts := m.instruction.Parts
-			var partSize int64
-			if m.instruction.PartSize != nil {
-				partSize = *m.instruction.PartSize
-			}
+			partSize := *m.instruction.PartSize
 
 			instDigest := digest.Digest(m.instruction.Digest)
 			var completed []completedPart
