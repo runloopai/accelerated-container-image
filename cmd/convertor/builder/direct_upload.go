@@ -26,8 +26,8 @@ import (
 )
 
 const (
-	ociManifestV1MediaType  = "application/vnd.oci.image.manifest.v1+json"
-	partUploadConcurrency   = 4
+	ociManifestV1MediaType = "application/vnd.oci.image.manifest.v1+json"
+	partUploadConcurrency  = 4
 )
 
 // CRC-64/NVME lookup table. Go's crc64.MakeTable takes the polynomial in
@@ -51,11 +51,11 @@ type prepareDirectUploadRequest struct {
 }
 
 type blobUploadInstruction struct {
-	Digest   string            `json:"digest"`
-	Exists   bool              `json:"exists"`
-	Token    *string           `json:"token,omitempty"`
-	Parts    []uploadPartInfo  `json:"parts,omitempty"`
-	PartSize *int64            `json:"part_size,omitempty"`
+	Digest   string           `json:"digest"`
+	Exists   bool             `json:"exists"`
+	Token    *string          `json:"token,omitempty"`
+	Parts    []uploadPartInfo `json:"parts,omitempty"`
+	PartSize *int64           `json:"part_size,omitempty"`
 }
 
 type uploadPartInfo struct {
@@ -190,7 +190,7 @@ func DirectUploadFromStore(
 				if err != nil {
 					return fmt.Errorf("reading config blob: %w", err)
 				}
-				completed, err = uploadPartsFromBytes(client, configBytes, parts, partSize)
+				completed, err = uploadPartsFromBytes(gctx, client, configBytes, parts, partSize)
 				if err != nil {
 					return fmt.Errorf("uploading config parts: %w", err)
 				}
@@ -315,7 +315,7 @@ func doPost(ctx context.Context, client *http.Client, rawURL string, body []byte
 // ---- Part upload helpers ----------------------------------------------------
 
 // uploadPartsFromBytes uploads an in-memory blob via the presigned part URLs.
-func uploadPartsFromBytes(client *http.Client, data []byte, parts []uploadPartInfo, partSize int64) ([]completedPart, error) {
+func uploadPartsFromBytes(ctx context.Context, client *http.Client, data []byte, parts []uploadPartInfo, partSize int64) ([]completedPart, error) {
 	completed := make([]completedPart, 0, len(parts))
 	for _, p := range parts {
 		offset := int64(p.Number-1) * partSize
@@ -323,7 +323,7 @@ func uploadPartsFromBytes(client *http.Client, data []byte, parts []uploadPartIn
 		if end > int64(len(data)) {
 			end = int64(len(data))
 		}
-		etag, err := putPart(client, p.URL, data[offset:end])
+		etag, err := putPart(ctx, client, p.URL, data[offset:end])
 		if err != nil {
 			return nil, fmt.Errorf("part %d: %w", p.Number, err)
 		}
@@ -363,7 +363,12 @@ func uploadPartsFromStore(
 		wg.Add(1)
 		go func(idx int, p uploadPartInfo) {
 			defer wg.Done()
-			sem <- struct{}{}
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				results[idx] = result{err: ctx.Err()}
+				return
+			}
 			defer func() { <-sem }()
 
 			offset := int64(p.Number-1) * partSize
@@ -376,7 +381,7 @@ func uploadPartsFromStore(
 				results[idx] = result{err: fmt.Errorf("reading part %d from store: %w", p.Number, err)}
 				return
 			}
-			etag, err := putPart(client, p.URL, buf)
+			etag, err := putPart(ctx, client, p.URL, buf)
 			if err != nil {
 				results[idx] = result{err: fmt.Errorf("part %d: %w", p.Number, err)}
 				return
@@ -409,17 +414,21 @@ func uploadPartsFromStore(
 
 // putPart PUTs buf to the presigned URL and returns the ETag.
 // Retries up to 3 times on transient (5xx) errors.
-func putPart(client *http.Client, presignedURL string, buf []byte) (string, error) {
+func putPart(ctx context.Context, client *http.Client, presignedURL string, buf []byte) (string, error) {
 	const maxRetries = 3
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			delay := time.Duration(100<<(attempt-1)) * time.Millisecond // 100ms, 200ms, 400ms
 			logrus.Warnf("retrying S3 part upload (attempt=%d delay=%s): %v", attempt, delay, lastErr)
-			time.Sleep(delay)
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(delay):
+			}
 		}
 
-		req, err := http.NewRequest(http.MethodPut, presignedURL, bytes.NewReader(buf))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, presignedURL, bytes.NewReader(buf))
 		if err != nil {
 			return "", err
 		}
