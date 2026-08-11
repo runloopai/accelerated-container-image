@@ -121,13 +121,16 @@ func DirectUploadFromStore(
 	var manifestDesc *ocispec.Descriptor
 	for _, img := range imgs {
 		if img.Target.MediaType == ocispec.MediaTypeImageIndex {
-			continue
+			return "", fmt.Errorf("direct upload does not support multi-arch output (OCI index found); use a single-platform build")
 		}
-		manifestDesc = &img.Target
-		break
+		if manifestDesc != nil {
+			return "", fmt.Errorf("direct upload does not support multi-arch output (multiple manifests found); use a single-platform build")
+		}
+		desc := img.Target
+		manifestDesc = &desc
 	}
 	if manifestDesc == nil {
-		return "", fmt.Errorf("no non-index image found in output store")
+		return "", fmt.Errorf("no image found in output store")
 	}
 
 	// Read manifest bytes verbatim — reusing the on-disk bytes ensures the
