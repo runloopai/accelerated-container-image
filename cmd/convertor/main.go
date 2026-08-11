@@ -373,7 +373,18 @@ Version: ` + commitID,
 					}
 					logrus.Info("tar export finished")
 				}
-								// Handle direct upload if requested
+				// Handle direct upload if requested.
+				//
+				// NOTE: direct upload starts only after conversion has produced the
+				// complete manifest, so OCI conversion and Discoball upload are fully
+				// sequential. This is intentional for the initial allowlisted rollout
+				// — it keeps the implementation simple and avoids partial uploads on
+				// conversion failure — but it adds latency versus a pipelined approach
+				// where each blob is prepared and uploaded as its digest becomes
+				// available, and the manifest is confirmed only after all uploads
+				// finish. That pipelining would require a protocol change (per-blob
+				// prepare calls during conversion) and is left as a future
+				// optimization. See RUN-2711 for the measured OCI regression.
 				if directUpload && exportResolver != nil {
 					imageRef := repo + ":" + overlaybd
 					logrus.Debugf("uploading converted overlaybd artifacts directly to discoball: %s", imageRef)
