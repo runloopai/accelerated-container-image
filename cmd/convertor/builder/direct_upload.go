@@ -118,24 +118,24 @@ func DirectUploadFromStore(
 	if err != nil {
 		return "", fmt.Errorf("listing image store: %w", err)
 	}
-	var manifestDesc *ocispec.Descriptor
+	var nonIndex []images.Image
 	for _, img := range imgs {
 		if img.Target.MediaType == ocispec.MediaTypeImageIndex {
 			return "", fmt.Errorf("direct upload does not support multi-arch output (OCI index found); use a single-platform build")
 		}
-		if manifestDesc != nil {
-			return "", fmt.Errorf("direct upload does not support multi-arch output (multiple manifests found); use a single-platform build")
-		}
-		desc := img.Target
-		manifestDesc = &desc
+		nonIndex = append(nonIndex, img)
 	}
-	if manifestDesc == nil {
+	if len(nonIndex) == 0 {
 		return "", fmt.Errorf("no image found in output store")
 	}
+	if len(nonIndex) > 1 {
+		return "", fmt.Errorf("direct upload does not support multi-arch output (multiple manifests found); use a single-platform build")
+	}
+	manifestDesc := nonIndex[0].Target
 
 	// Read manifest bytes verbatim — reusing the on-disk bytes ensures the
 	// manifest digest stored by discoball matches what the content store holds.
-	manifestBytes, err := content.ReadBlob(ctx, store, *manifestDesc)
+	manifestBytes, err := content.ReadBlob(ctx, store, manifestDesc)
 	if err != nil {
 		return "", fmt.Errorf("reading manifest: %w", err)
 	}
