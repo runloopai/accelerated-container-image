@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/crc64"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -93,8 +94,9 @@ type confirmDirectUploadRequest struct {
 // prepare/confirm API. Returns the manifest digest stored by discoball.
 //
 // imageRef must be the full reference (e.g. "disco.runloop.pro/account:bpt_xxx").
-// registryURL is used only to determine the scheme
-// (e.g. "https://disco.runloop.pro").
+// registryURL is the discoball API endpoint (e.g. "https://disco.runloop.pro").
+// When provided, its scheme and host are used as the discoball endpoint; when
+// empty, the endpoint is derived from the registry host in imageRef over https.
 func DirectUploadFromStore(
 	ctx context.Context,
 	store content.Store,
@@ -102,16 +104,26 @@ func DirectUploadFromStore(
 	imageRef string,
 	registryURL string,
 ) (string, error) {
-	scheme := "https"
-	if strings.HasPrefix(registryURL, "http://") {
-		scheme = "http"
-	}
-
 	registry, repository, tag, err := parseImageRef(imageRef)
 	if err != nil {
 		return "", fmt.Errorf("invalid image ref %q: %w", imageRef, err)
 	}
 	logrus.Debugf("direct-upload: registry=%s repository=%s tag=%s", registry, repository, tag)
+
+	// Determine the discoball endpoint host and scheme. When --registry-url is
+	// provided we use its host (allowing the API endpoint to differ from the
+	// image destination host in -r). When omitted we fall back to the registry
+	// host from -r over https.
+	apiHost := registry
+	scheme := "https"
+	if registryURL != "" {
+		parsed, parseErr := url.Parse(registryURL)
+		if parseErr != nil || parsed.Host == "" {
+			return "", fmt.Errorf("invalid --registry-url %q: must be an absolute URL with a host (e.g. https://disco.runloop.pro)", registryURL)
+		}
+		apiHost = parsed.Host
+		scheme = parsed.Scheme
+	}
 
 	// Find the converted image in the store.
 	imgs, err := imageStore.List(ctx, "")
@@ -145,8 +157,22 @@ func DirectUploadFromStore(
 		return "", fmt.Errorf("parsing manifest: %w", err)
 	}
 
-	client := &http.Client{}
-	baseURL := fmt.Sprintf("%s://%s/gitlab/v1/repositories/%s/direct-upload", scheme, registry, repository)
+	// Transport with per-operation timeouts. http.Client.Timeout is intentionally
+	// unset: S3 PUTs can be large and slow to stream. ResponseHeaderTimeout instead
+	// bounds the server think-time after all request bytes are sent, catching stuck
+	// connections without killing legitimate large-blob uploads mid-stream.
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   30 * time.Second,
+			ResponseHeaderTimeout: 5 * time.Minute,
+		},
+	}
+	// repository is interpolated as literal path segments (slashes pass through
+	// unencoded), matching the Rust client and the server's wildcard route
+	// ({*repo} in axum). In practice repository is always a single-segment
+	// account UUID so no slash encoding ambiguity arises.
+	baseURL := fmt.Sprintf("%s://%s/gitlab/v1/repositories/%s/direct-upload", scheme, apiHost, repository)
 
 	// Phase 1: prepare.
 	prep, err := prepareUpload(ctx, client, baseURL, manifestBytes)

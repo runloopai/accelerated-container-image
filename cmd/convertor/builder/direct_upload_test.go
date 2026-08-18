@@ -1,9 +1,13 @@
 package builder
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"hash/crc64"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 )
 
@@ -177,5 +181,84 @@ func TestCRC64NVMECheckVector(t *testing.T) {
 				t.Errorf("CRC-64/NVME(%q) = 0x%016X, want 0x%016X", tt.input, got, tt.wantHex)
 			}
 		})
+	}
+}
+
+func TestComputeCRC64NVMEEncoding(t *testing.T) {
+	// Pins the full on-wire encoding: big-endian uint64 → standard base64.
+	// A little-endian uint64 of 0xAE8B14860A799888 produces "iJh5mBS..."
+	// instead of "rosU...", so this catches byte-order bugs that the hex
+	// check-vector test above cannot.
+	tests := []struct {
+		name  string
+		input []byte
+		want  string
+	}{
+		// 0xAE8B14860A799888 BE → [AE 8B 14 86 0A 79 98 88] → "rosUhgp5mIg="
+		{"check vector", []byte("123456789"), "rosUhgp5mIg="},
+		// 0x0000000000000000 BE → [00 00 00 00 00 00 00 00] → "AAAAAAAAAAA=" (8 bytes = 12 base64 chars)
+		{"empty", []byte{}, "AAAAAAAAAAA="},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computeCRC64NVME(tt.input)
+			if got != tt.want {
+				t.Errorf("computeCRC64NVME(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPutPart5xxRetrySucceeds(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) <= 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("ETag", `"etag-abc"`)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	etag, err := putPart(context.Background(), &http.Client{}, srv.URL, []byte("data"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if etag != `"etag-abc"` {
+		t.Errorf("etag = %q, want %q", etag, `"etag-abc"`)
+	}
+	if n := calls.Load(); n != 3 {
+		t.Errorf("server received %d requests, want 3 (1 initial + 2 retries)", n)
+	}
+}
+
+func TestPutPartMissingETag(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK) // no ETag header
+	}))
+	defer srv.Close()
+
+	_, err := putPart(context.Background(), &http.Client{}, srv.URL, []byte("data"))
+	if err == nil {
+		t.Fatal("expected error for missing ETag, got nil")
+	}
+}
+
+func TestPutPartExhaustsRetries(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := putPart(context.Background(), &http.Client{}, srv.URL, []byte("data"))
+	if err == nil {
+		t.Fatal("expected error after exhausted retries, got nil")
+	}
+	// maxRetries=3 means attempts 0,1,2,3 — four total requests.
+	if n := calls.Load(); n != 4 {
+		t.Errorf("server received %d requests, want 4 (1 initial + 3 retries)", n)
 	}
 }

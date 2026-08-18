@@ -388,18 +388,12 @@ Version: ` + commitID,
 				if directUpload && exportResolver != nil {
 					imageRef := repo + ":" + overlaybd
 					logrus.Debugf("uploading converted overlaybd artifacts directly to discoball: %s", imageRef)
-					regURL := registryURL
-					if regURL == "" {
-						// Derive from the registry portion of repo (first path segment).
-						registry := strings.SplitN(repo, "/", 2)[0]
-						regURL = "https://" + registry
-					}
 					manifestDigest, err := builder.DirectUploadFromStore(
 						ctx,
 						exportResolver.OutputStore(),
 						exportResolver.OutputImageStore(),
 						imageRef,
-						regURL,
+						registryURL,
 					)
 					if err != nil {
 						logrus.Errorf("direct upload failed: %v", err)
@@ -463,7 +457,7 @@ func init() {
 
 	// direct upload
 	rootCmd.Flags().BoolVar(&directUpload, "direct-upload", false, "upload converted artifacts directly to discoball (requires --import-tar and -r/--repository)")
-	rootCmd.Flags().StringVar(&registryURL, "registry-url", "", "registry base URL for direct upload (e.g. https://disco.runloop.pro); defaults to https://{registry from -r}")
+	rootCmd.Flags().StringVar(&registryURL, "registry-url", "", "discoball API endpoint for direct upload (e.g. https://disco.runloop.pro); its host and scheme override the registry host from -r. Defaults to https://{registry host from -r}")
 
 	// certification
 	rootCmd.Flags().StringArrayVar(&certDirs, "cert-dir", nil, "In these directories, root CA should be named as *.crt and client cert should be named as *.cert, *.key")
