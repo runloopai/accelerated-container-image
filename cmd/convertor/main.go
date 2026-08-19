@@ -62,9 +62,10 @@ var (
 	retryCount       int
 
 	// tar import/export
-	importTar     string
-	exportTar     string
-	tarExportRepo string
+	importTar          string
+	importOCILayoutDir string
+	exportTar          string
+	tarExportRepo      string
 
 	// direct upload
 	directUpload bool
@@ -94,16 +95,20 @@ Version: ` + commitID,
 				logrus.SetLevel(logrus.DebugLevel)
 			}
 			tb := ""
-			if importTar == "" && digestInput == "" && tagInput == "" {
-				logrus.Error("one of input-tag [-i], input-digest [-g], or import-tar is required")
+			if importTar == "" && importOCILayoutDir == "" && digestInput == "" && tagInput == "" {
+				logrus.Error("one of input-tag [-i], input-digest [-g], --import-tar, or --import-oci-layout-dir is required")
 				os.Exit(1)
 			}
-			if importTar != "" && (digestInput != "" || tagInput != "") {
-				logrus.Error("import-tar cannot be used with input-tag or input-digest")
+			if importTar != "" && importOCILayoutDir != "" {
+				logrus.Error("--import-tar and --import-oci-layout-dir are mutually exclusive")
 				os.Exit(1)
 			}
-			if directUpload && importTar == "" {
-				logrus.Error("--direct-upload requires --import-tar")
+			if (importTar != "" || importOCILayoutDir != "") && (digestInput != "" || tagInput != "") {
+				logrus.Error("--import-tar/--import-oci-layout-dir cannot be used with input-tag or input-digest")
+				os.Exit(1)
+			}
+			if directUpload && importTar == "" && importOCILayoutDir == "" {
+				logrus.Error("--direct-upload requires --import-tar or --import-oci-layout-dir")
 				os.Exit(1)
 			}
 			if directUpload && exportTar != "" {
@@ -147,14 +152,23 @@ Version: ` + commitID,
 			var importResolver *builder.ContentStoreResolver
 			var exportResolver *builder.FileBasedResolver
 
-			if importTar != "" {
-				// Import mode - create content store resolver from tar
-				logrus.Debugf("importing from tar file: %s", importTar)
+			if importTar != "" || importOCILayoutDir != "" {
+				// Import mode - create content store resolver from tar or OCI layout dir
 				var err error
-				importResolver, err = builder.NewContentStoreResolverFromTar(ctx, importTar)
-				if err != nil {
-					logrus.Errorf("failed to import tar file: %v", err)
-					os.Exit(1)
+				if importOCILayoutDir != "" {
+					logrus.Debugf("importing from OCI layout dir: %s", importOCILayoutDir)
+					importResolver, err = builder.NewContentStoreResolverFromOCILayoutDir(ctx, importOCILayoutDir)
+					if err != nil {
+						logrus.Errorf("failed to open OCI layout dir: %v", err)
+						os.Exit(1)
+					}
+				} else {
+					logrus.Debugf("importing from tar file: %s", importTar)
+					importResolver, err = builder.NewContentStoreResolverFromTar(ctx, importTar)
+					if err != nil {
+						logrus.Errorf("failed to import tar file: %v", err)
+						os.Exit(1)
+					}
 				}
 
 				// Find the multi-arch index to build all architectures
@@ -452,6 +466,7 @@ func init() {
 
 	// tar import/export
 	rootCmd.Flags().StringVar(&importTar, "import-tar", "", "import image from tar file (OCI layout format)")
+	rootCmd.Flags().StringVar(&importOCILayoutDir, "import-oci-layout-dir", "", "import image from OCI image layout directory (written by buildkitd type=oci,tar=false); blobs are read in-place with no extraction copy")
 	rootCmd.Flags().StringVar(&exportTar, "export-tar", "", "export converted image to tar file (OCI layout format)")
 	rootCmd.Flags().StringVar(&tarExportRepo, "tar-export-repo", "localhost/converted", "repository name used in exported tar file (only used with --export-tar)")
 

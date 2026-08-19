@@ -406,6 +406,44 @@ func parseRef(ref string) (name, tag string) {
 	return ref, ""
 }
 
+// NewContentStoreResolverFromOCILayoutDir creates a resolver backed by an OCI
+// image layout directory written by buildkitd (type=oci,tar=false). Unlike
+// NewContentStoreResolverFromTar, the local content store is opened directly on
+// the existing directory — blobs are read in-place with no extraction copy.
+func NewContentStoreResolverFromOCILayoutDir(ctx context.Context, dir string) (*ContentStoreResolver, error) {
+	store, err := local.NewStore(dir)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to open content store at %s", dir)
+	}
+
+	imageStore := &memoryImageStore{
+		images: make(map[string]images.Image),
+	}
+
+	indexData, err := os.ReadFile(filepath.Join(dir, "index.json"))
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to read index.json from %s", dir)
+	}
+
+	var index v1.Index
+	if err := json.Unmarshal(indexData, &index); err != nil {
+		return nil, errors.Wrapf(err, "failed to parse index.json")
+	}
+
+	for i, manifest := range index.Manifests {
+		ref := fmt.Sprintf("local/imported:%s", manifest.Digest.Encoded()[:12])
+		if manifest.Annotations != nil {
+			if name, ok := manifest.Annotations["org.opencontainers.image.ref.name"]; ok && name != "" {
+				ref = name
+			}
+		}
+		log.G(ctx).Debugf("registered image %d from OCI layout dir: %s -> %s", i, ref, manifest.Digest)
+		imageStore.Create(ctx, images.Image{Name: ref, Target: manifest})
+	}
+
+	return NewContentStoreResolver(store, imageStore), nil
+}
+
 // ExportContentStoreToTar exports a content store to a tar file
 func ExportContentStoreToTar(ctx context.Context, store content.Store, imageStore images.Store, tarPath string) error {
 	// Create tar file
