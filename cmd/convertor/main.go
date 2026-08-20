@@ -123,8 +123,8 @@ Version: ` + commitID,
 				logrus.Error("--direct-upload requires --oci")
 				os.Exit(1)
 			}
-			if importTar == "" && repo == "" {
-				logrus.Error("repository is required when not using import-tar")
+			if importTar == "" && importOCILayoutDir == "" && repo == "" {
+				logrus.Error("repository is required when not using --import-tar or --import-oci-layout-dir")
 				os.Exit(1)
 			}
 			if overlaybd == "" && fastoci == "" && turboOCI == "" {

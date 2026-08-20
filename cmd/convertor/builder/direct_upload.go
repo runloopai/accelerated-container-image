@@ -368,12 +368,21 @@ func doPost(ctx context.Context, client *http.Client, rawURL string, body []byte
 
 // uploadPartsFromBytes uploads an in-memory blob via the presigned part URLs.
 func uploadPartsFromBytes(ctx context.Context, client *http.Client, data []byte, parts []uploadPartInfo, partSize int64) ([]completedPart, error) {
+	blobSize := int64(len(data))
+	for _, p := range parts {
+		if p.Number < 1 {
+			return nil, fmt.Errorf("invalid part number %d: must be >= 1", p.Number)
+		}
+		if offset := int64(p.Number-1) * partSize; offset >= blobSize {
+			return nil, fmt.Errorf("part %d: offset %d exceeds blob size %d", p.Number, offset, blobSize)
+		}
+	}
 	completed := make([]completedPart, 0, len(parts))
 	for _, p := range parts {
 		offset := int64(p.Number-1) * partSize
 		end := offset + partSize
-		if end > int64(len(data)) {
-			end = int64(len(data))
+		if end > blobSize {
+			end = blobSize
 		}
 		etag, err := putPart(ctx, client, p.URL, data[offset:end])
 		if err != nil {
@@ -403,6 +412,15 @@ func uploadPartsFromStore(
 	defer ra.Close()
 
 	totalSize := ra.Size()
+	for _, p := range parts {
+		if p.Number < 1 {
+			return nil, nil, fmt.Errorf("invalid part number %d: must be >= 1", p.Number)
+		}
+		if offset := int64(p.Number-1) * partSize; offset >= totalSize {
+			return nil, nil, fmt.Errorf("part %d: offset %d exceeds blob size %d", p.Number, offset, totalSize)
+		}
+	}
+
 	type result struct {
 		part completedPart
 		err  error

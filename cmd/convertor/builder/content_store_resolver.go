@@ -431,6 +431,10 @@ func NewContentStoreResolverFromOCILayoutDir(ctx context.Context, dir string) (*
 	}
 
 	for i, manifest := range index.Manifests {
+		if isProvenanceManifestWithContent(ctx, store, manifest) {
+			log.G(ctx).Debugf("skipping provenance/attestation manifest %d from OCI layout dir: %s", i, manifest.Digest)
+			continue
+		}
 		ref := fmt.Sprintf("local/imported:%s", manifest.Digest.Encoded()[:12])
 		if manifest.Annotations != nil {
 			if name, ok := manifest.Annotations["org.opencontainers.image.ref.name"]; ok && name != "" {
